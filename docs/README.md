@@ -15,6 +15,7 @@ fixes, so that every code change lands with a stated cause and a way to verify i
 | [01 — Defect Analysis](01-defect-analysis.md) | All 27 confirmed defects: root cause, failure scenario, evidence, proposed fix |
 | [02 — Remediation Plan](02-remediation-plan.md) | The order to fix them in, and why that order is forced |
 | [03 — Open Questions](03-open-questions.md) | Decisions needed from a product/infra owner before some fixes can land |
+| **[05 — Reproduction Runbook](05-reproduction.md)** | Copy-paste commands to watch each defect fail, with real captured output |
 
 > **The analysis found more than the assignment asks for.** 27 defects are real; 19
 > of them cause a reported symptom, and land as 6 commits. [04 — Scope](04-scope.md) draws that line and
@@ -124,11 +125,14 @@ actual source and corrected.
 
 Stated plainly, because they change how much each finding should be trusted:
 
-- **2 of 27 were actually executed.** D1 and D5 were reproduced against the running
-  stack (below). The other 25 rest on reading the installed code plus an adversarial
-  refutation pass — strong, but *argued* rather than *observed*. The `confidence`
-  field on each defect means "the mechanism was traced end to end in the source," not
-  "we ran it."
+- ~~**2 of 27 were actually executed.**~~ **Superseded.** Every in-scope defect has
+  since been run against the live stack — see
+  [05 — Reproduction Runbook](05-reproduction.md), which records real captured output.
+  Of the 19 in-scope defects: **14 reproduced directly, 2 partially (D8 is an
+  intermittent race, D11 needs a forced-failure mock), and 3 stand on code inspection
+  alone (D4, D9, D18)**. The 8 out-of-scope defects were not re-tested. The
+  `confidence` field on each defect still means "the mechanism was traced end to end
+  in the source," not "we ran it" — the runbook is the authority on what was observed.
 - **Severity was originally ungraded.** The first pass asked for
   `critical|high|medium|low` with no definitions attached, so the initial ratings were
   model intuition. They have since been re-scored against an explicit
