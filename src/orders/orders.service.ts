@@ -37,6 +37,31 @@ export class OrdersService {
     private cacheManager: Cache,
   ) {}
 
+  /**
+   * Flips an order's status only if it is currently one of `from`, in a single
+   * conditional UPDATE. Returns false when no row matched, which is how a
+   * caller learns it lost a race rather than discovering it afterwards.
+   *
+   * Every state change goes through this instead of read-then-save, because the
+   * gap between reading a status and writing it is exactly where a second
+   * request slips in and repeats work that should happen once.
+   */
+  private async transitionStatus(
+    id: number,
+    from: OrderStatus[],
+    to: OrderStatus,
+    manager: EntityManager = this.ordersRepository.manager,
+  ): Promise<boolean> {
+    const result = await manager
+      .createQueryBuilder()
+      .update(Order)
+      .set({ status: to })
+      .where('id = :id AND status IN (:...from)', { id, from })
+      .execute();
+
+    return result.affected === 1;
+  }
+
   async findAll(): Promise<Order[]> {
     return this.ordersRepository.find({ 
       relations: ['user', 'items', 'items.product'] 
@@ -132,15 +157,28 @@ export class OrdersService {
 
   async processPayment(orderId: number): Promise<{ success: boolean; transactionId: string }> {
     const order = await this.findOne(orderId);
-    
+
+    // Claim the order BEFORE calling the provider. Confirming afterwards would
+    // let two concurrent pays both pass the check and both charge; claiming
+    // first means the loser matches no row and is turned away having charged
+    // nothing. It is also what stops a cancelled order being resurrected.
+    const claimed = await this.transitionStatus(
+      orderId,
+      [OrderStatus.PENDING],
+      OrderStatus.CONFIRMED,
+    );
+    if (!claimed) {
+      throw new BadRequestException(
+        `Order #${orderId} cannot be paid while it is ${order.status}`,
+      );
+    }
+
     let lastError: Error;
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       try {
         const result = await paymentService.processPayment(orderId, Number(order.total));
-        
+
         if (result.success) {
-          order.status = OrderStatus.CONFIRMED;
-          await this.ordersRepository.save(order);
           return result;
         }
       } catch (error) {
@@ -149,23 +187,47 @@ export class OrdersService {
       }
     }
     
+    // Every attempt failed, so release the claim: an order left CONFIRMED
+    // without a payment behind it is worse than one that stayed PENDING.
+    await this.transitionStatus(
+      orderId,
+      [OrderStatus.CONFIRMED],
+      OrderStatus.PENDING,
+    );
+
     throw lastError!;
   }
 
   async cancel(id: number): Promise<Order> {
     const order = await this.findOne(id);
-    
-    if (order.status !== OrderStatus.PENDING) {
-      throw new BadRequestException('Only pending orders can be cancelled');
-    }
-    
-    for (const item of order.items) {
-      await this.productsService.adjustStock(item.productId, item.quantity);
-    }
+
+    await this.ordersRepository.manager.transaction(
+      async (manager: EntityManager) => {
+        // Flip first, conditionally. Whoever wins the flip owns the restore, so
+        // a second cancel of the same order matches no row and puts the stock
+        // back zero times instead of twice.
+        const cancelled = await this.transitionStatus(
+          id,
+          [OrderStatus.PENDING],
+          OrderStatus.CANCELLED,
+          manager,
+        );
+        if (!cancelled) {
+          throw new BadRequestException('Only pending orders can be cancelled');
+        }
+
+        for (const item of order.items) {
+          await this.productsService.adjustStock(
+            item.productId,
+            item.quantity,
+            manager,
+          );
+        }
+      },
+    );
     await this.productsService.invalidateSearchCache();
-    
-    order.status = OrderStatus.CANCELLED;
-    return this.ordersRepository.save(order);
+
+    return this.findOne(id);
   }
 
   async getOrderWithFullDetails(id: number): Promise<any> {
