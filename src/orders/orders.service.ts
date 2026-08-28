@@ -292,10 +292,11 @@ export class OrdersService {
       throw new NotFoundException(`Order #${id} not found`);
     }
 
-    const enriched: any = { ...order };
-    enriched.user = { ...order.user };
-    enriched.user.latestOrder = enriched;
-
-    return JSON.parse(JSON.stringify(enriched));
+    // The enrichment that used to live here set `user.latestOrder` to the
+    // enriched object itself, then JSON.stringify'd it — a cycle, so every
+    // valid request died on "Converting circular structure to JSON". The
+    // self-reference carried no information the caller did not already have:
+    // the order it points back to is the one being returned.
+    return order;
   }
 }
