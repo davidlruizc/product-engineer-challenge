@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Product } from './product.entity';
@@ -51,12 +51,32 @@ export class ProductsService {
     return saved;
   }
 
-  async updateStock(id: number, quantity: number): Promise<Product> {
-    const product = await this.findOne(id);
-    product.stock = quantity;
-    const saved = await this.productsRepository.save(product);
-    await this.invalidateSearchCache();
-    return saved;
+  /**
+   * Applies a *relative* change to stock in a single conditional UPDATE.
+   *
+   * Returns false when the change would take stock negative, because the WHERE
+   * clause then matches no row. Callers get insufficient stock as a return
+   * value rather than as a race: there is no window between reading the level
+   * and writing it, so two concurrent orders cannot both see the same stock.
+   *
+   * Runs on the supplied EntityManager so it can join a caller's transaction.
+   * Does not touch the search cache — callers evict once their unit of work has
+   * committed, so a concurrent search cannot re-cache the pre-commit level.
+   */
+  async adjustStock(
+    productId: number,
+    delta: number,
+    manager: EntityManager = this.productsRepository.manager,
+  ): Promise<boolean> {
+    const result = await manager
+      .createQueryBuilder()
+      .update(Product)
+      .set({ stock: () => 'stock + :delta' })
+      .where('id = :id AND stock + :delta >= 0', { id: productId })
+      .setParameter('delta', delta)
+      .execute();
+
+    return result.affected === 1;
   }
 
   async remove(id: number): Promise<void> {
@@ -74,7 +94,7 @@ export class ProductsService {
     return 1;
   }
 
-  private async invalidateSearchCache(): Promise<void> {
+  async invalidateSearchCache(): Promise<void> {
     const current = await this.getSearchVersion();
     await this.cacheManager.set(
       SEARCH_VERSION_KEY,

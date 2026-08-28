@@ -1,11 +1,12 @@
 import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Order, OrderStatus } from './order.entity';
 import { OrderItem } from './order-item.entity';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { Product } from '../products/product.entity';
 import { UsersService } from '../users/users.service';
 import { ProductsService } from '../products/products.service';
 
@@ -62,37 +63,65 @@ export class OrdersService {
 
   async create(createOrderDto: CreateOrderDto): Promise<Order> {
     const user = await this.usersService.findOne(createOrderDto.userId);
-    
-    const order = this.ordersRepository.create({
-      userId: user.id,
-      status: OrderStatus.PENDING,
-    });
-    const savedOrder = await this.ordersRepository.save(order);
-    
-    let total = 0;
-    for (const itemDto of createOrderDto.items) {
-      const product = await this.productsService.findOne(itemDto.productId);
-      
-      if (product.stock < itemDto.quantity) {
-        throw new BadRequestException(`Not enough stock for ${product.name}`);
-      }
-      
-      const orderItem = this.orderItemsRepository.create({
-        orderId: savedOrder.id,
-        productId: product.id,
-        quantity: itemDto.quantity,
-        price: product.price,
-      });
-      
-      await this.orderItemsRepository.save(orderItem);
-      total += product.price * itemDto.quantity;
-      this.productsService.updateStock(product.id, product.stock - itemDto.quantity);
+
+    // Merge duplicate line items before anything checks stock. Three lines of 4
+    // units against stock 10 each pass on their own and oversell by 2, so
+    // per-line validation is not enough: the check has to see the true total
+    // quantity per product. Sorted by id so that concurrent orders touching the
+    // same products always lock rows in the same order and cannot deadlock.
+    const quantities = new Map<number, number>();
+    for (const item of createOrderDto.items) {
+      const previous = quantities.get(item.productId) ?? 0;
+      quantities.set(item.productId, previous + item.quantity);
     }
-    
-    savedOrder.total = total;
-    await this.ordersRepository.save(savedOrder);
-    
-    return this.findOne(savedOrder.id);
+    const lines = [...quantities.entries()].sort(([a], [b]) => a - b);
+
+    const orderId = await this.ordersRepository.manager.transaction(
+      async (manager: EntityManager) => {
+        let total = 0;
+        const items: OrderItem[] = [];
+
+        for (const [productId, quantity] of lines) {
+          const product = await manager.findOne(Product, {
+            where: { id: productId },
+          });
+          if (!product) {
+            throw new NotFoundException(`Product #${productId} not found`);
+          }
+
+          const reserved = await this.productsService.adjustStock(
+            productId,
+            -quantity,
+            manager,
+          );
+          if (!reserved) {
+            throw new BadRequestException(`Not enough stock for ${product.name}`);
+          }
+
+          items.push(
+            manager.create(OrderItem, { productId, quantity, price: product.price }),
+          );
+          total += Number(product.price) * quantity;
+        }
+
+        // A single INSERT, with the total already known and the items cascaded,
+        // so no window exists in which an order is visible without its lines.
+        const order = manager.create(Order, {
+          userId: user.id,
+          status: OrderStatus.PENDING,
+          total,
+          items,
+        });
+        const saved = await manager.save(order);
+        return saved.id;
+      },
+    );
+
+    // Evicted after the commit, never inside it: invalidating first would let a
+    // concurrent search re-cache the pre-commit stock level under the new key.
+    await this.productsService.invalidateSearchCache();
+
+    return this.findOne(orderId);
   }
 
   async updateStatus(id: number, status: OrderStatus): Promise<Order> {
@@ -131,9 +160,9 @@ export class OrdersService {
     }
     
     for (const item of order.items) {
-      const product = await this.productsService.findOne(item.productId);
-      await this.productsService.updateStock(product.id, product.stock + item.quantity);
+      await this.productsService.adjustStock(item.productId, item.quantity);
     }
+    await this.productsService.invalidateSearchCache();
     
     order.status = OrderStatus.CANCELLED;
     return this.ordersRepository.save(order);
