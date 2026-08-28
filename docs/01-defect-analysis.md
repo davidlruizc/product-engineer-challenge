@@ -101,11 +101,11 @@ src/main.ts:5-9 verbatim — line 7 `app.useGlobalPipes(new ValidationPipe({ tra
 
 ### Proposed fix
 
-src/main.ts:7 → `app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }));`. `whitelist` strips undecorated properties before `repository.create()` ever sees them; `forbidNonWhitelisted` turns such a body into an explicit 400 rather than a silent drop. Belt-and-braces: build entities from explicit fields in the services instead of passing the DTO object through.
+src/main.ts:7 → `app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));`. `whitelist` strips undecorated properties before `repository.create()` ever sees them, which is what closes this defect. `forbidNonWhitelisted: true` would additionally turn such a body into an explicit 400 rather than a silent drop — it is the correct end state but is **deliberately not shipped in C1**, because it converts previously-tolerated requests into errors for callers that cannot be surveyed; see [Q11](03-open-questions.md#q11). Belt-and-braces: build entities from explicit fields in the services instead of passing the DTO object through.
 
 ### How we'll know it's fixed
 
-`curl -s localhost:3000/products/5` and note the name. Then `curl -i -X POST localhost:3000/products -H 'content-type: application/json' -d '{"id":5,"name":"PWNED","price":1}'` must return 400 with `property id should not exist`, and `curl -s localhost:3000/products/5` must show the original name unchanged. Repeat for `POST /users` with an extra `id` and `isActive`.
+`curl -s localhost:3000/products/5` and note the name. Then `curl -i -X POST localhost:3000/products -H 'content-type: application/json' -d '{"id":5,"name":"PWNED","price":1}'` must return **201 carrying a new id**, not id 5 — the `id` is stripped, so the write lands as an INSERT instead of an UPDATE — and `curl -s localhost:3000/products/5` must show the original name unchanged. Repeat for `POST /users` with an extra `id` and `isActive`. **A 400 here is a failure, not a pass:** [Q11](03-open-questions.md#q11) ships `whitelist: true` alone, so undeclared properties are stripped silently. A 400 would mean `forbidNonWhitelisted` was enabled against that decision.
 
 ---
 
@@ -484,7 +484,9 @@ src/products/products.controller.ts:16 `return this.productsService.searchProduc
 
 ### Proposed fix
 
-Push the predicate into Postgres and bound the result: `this.productsRepository.find({ where: [{ name: ILike(`%${query}%`) }, { description: ILike(`%${query}%`) }], take: Math.min(limit, 100), skip: offset })`, backed by a trigram/GIN index on `name` and `description`. Reject or special-case an empty `q` rather than matching everything.
+Push the predicate into Postgres and bound the result: `this.productsRepository.find({ where: [{ name: ILike(`%${query}%`) }, { description: ILike(`%${query}%`) }], take: 100 })`. Reject or special-case an empty `q` rather than matching everything.
+
+**Scope note.** This defect is in scope as [C10](04-scope.md#c10-search-scans-the-whole-products-table). The commit is the predicate and the bound, nothing else: no `skip`/`offset` parameters (that is a pagination contract, i.e. [D16](#d16), which stays out) and no trigram/GIN index (an index is DDL, and with `synchronize: true` and no migrations it would ride in as a schema change). Both are sensible follow-ups; neither is needed to stop the full-table scan.
 
 ### How we'll know it's fixed
 

@@ -1,49 +1,177 @@
 # 03 — Open Questions
 
-Items that need a decision, or that qualify a claim made elsewhere in these docs.
-Several fixes are blocked on these — noted inline where that's the case.
+Items that needed a decision, or that qualify a claim made elsewhere in these docs.
 
-## Q1
+Every blocking question below is now **decided**. Each carries the step it gates, the
+decision taken, and the reasoning — so the choice can be reviewed independently of the
+code. Q-numbers are unchanged from the first draft; cross-references still resolve.
 
-All five reported symptoms map to at least one confirmed defect — no symptom is left unexplained. The thinnest mapping is 'cache behavior does not match expectations', which is carried entirely by the four defects in the cache theme; if operators report cache anomalies that survive step 3, that is a signal something beyond these four is in play.
+- [Part A — Decisions taken](#part-a) (blocked work; ordered by the step they gate)
+- [Part B — Resolved or non-blocking](#part-b) (recorded, no decision required)
 
-## Q2
+---
 
-CORRECTION TO THE FRAMING WE WERE GIVEN: broken Redis wiring does NOT fully mask the cache-key collision. Because @nestjs/cache-manager falls back to an in-process Keyv (not a no-op), `GET /products/search?q=laptop` followed by `?q=shoes` reproduces the wrong-results bug TODAY within a single process. What the wiring defect actually masks is (a) the `db: 0` defect, entirely; (b) persistence across restarts — under `nest start --watch` every file save wipes the cache, which is why the bug reads as intermittent; (c) all cross-instance staleness; and (d) any redis-cli-based verification of a fix. The step ordering stands, but the design doc should state the masking precisely rather than claiming the key bug cannot reproduce.
+<a id="part-a"></a>
+## Part A — Decisions taken
 
-## Q3
+| | Question | Gates | Decision |
+|---|---|---|---|
+| [Q11](#q11) | `whitelist` vs `forbidNonWhitelisted` | Step 1 | `whitelist: true` alone |
+| [Q3](#q3) | Which Redis remediation path | Step 2 | Upgrade — keyv + `@keyv/redis` |
+| [Q7](#q7) | Duplicate `productId` in one order | Step 4 | Merge into one line item |
+| [Q6](#q6) | Payment idempotency | Steps 5–6 | Conditional status flip only — no new column |
+| [Q10](#q10) | Is `parent` needed in the tree payload | Step 7 | No — drop it; flat `path` if needed |
+| [Q5](#q5) | Delete semantics for referenced rows | Step 9 | 409 Conflict, not soft-delete |
+| [Q8](#q8) | Search bound, pagination and index | Step 10 | Hard `take` cap only |
 
-Which Redis remediation path? Swap to keyv + @keyv/redis (correct for the installed @nestjs/cache-manager 3.x / cache-manager 7.x, but adds/removes dependencies), or downgrade to @nestjs/cache-manager ^2 + cache-manager ^5 (the API cache-manager-ioredis-yet actually targets, keeping the existing dependency). Needs an owner decision before step 2 can start.
-
-## Q4
-
-Does switching to a real serializing Redis store break `UsersService.remove()`? Line 167 loads the user via the cached `findOne` and line 168 passes it to `usersRepository.remove(user)`. Today that is a live entity instance; after step 2 it is a deserialized plain object with `createdAt` as a string. Must be tested explicitly as part of step 2, not assumed.
-
-## Q5
-
-Delete semantics for referenced rows: 409 Conflict, or soft-delete via the existing `Product.isAvailable` / `User.isActive` columns? Both columns already exist and are currently unused by any endpoint, which hints soft-delete was the intent — but that changes what every list/search endpoint must filter on. Product decision required before step 9.
-
-## Q6
-
-Payment idempotency: the mock `processPayment(orderId, amount)` has no idempotency-key parameter, so the double-charge risk in the pay path cannot be fully closed inside this codebase. Is the real provider contract available, or should we key off orderId plus a stored transactionId?
-
-## Q7
-
-Should `POST /orders` with the same productId listed twice be merged into one line item or rejected as a 400? The atomic-decrement fix in step 4 makes the stock correct either way, but the resulting order shape differs and no requirement covers it.
-
-## Q8
-
-Should product search be paginated, and does the DB owner accept a trigram/GIN index on products(name, description)? Adding `take`/`skip` to search changes the response contract, and ILIKE without a trigram index will still seq-scan at scale.
-
-## Q9
-
-Is more than one app instance ever run in production? compose.yaml defines no app service and the README describes a single `pnpm start:dev` process. If single-instance is permanent, the cross-instance half of the cache defect is theoretical and step 2 can be scheduled on cost grounds rather than urgency — but it still gates verification of step 3.
-
-## Q10
-
-Is `parent` supposed to appear in the category tree payload at all? The current mixed up-and-down traversal is the source of the crash; if consumers only need the downward subtree, the fix is much smaller than a recursive CTE and the `parent` branch at products.service.ts:101-103 can simply be deleted.
+---
 
 ## Q11
+<a id="q11"></a>
 
-Are there existing API consumers that send extra body fields today? This determines whether step 1 can ship `forbidNonWhitelisted: true` immediately or must ship `whitelist: true` alone first and tighten later.
+**Gates** step 1 — the first commit. **Decision: ship `whitelist: true` alone; do not enable `forbidNonWhitelisted` yet.**
 
+*The question was:* are there existing API consumers sending extra body fields today? That determines whether step 1 can ship `forbidNonWhitelisted: true` immediately or must ship `whitelist: true` alone and tighten later.
+
+*Why this answer:* `whitelist: true` fully closes [D2](01-defect-analysis.md#d2) — `id` is stripped from the DTO, `repository.create()` stops mapping it onto the entity, and `save()` stops turning into an `UPDATE`. The root cause is dead either way. What `forbidNonWhitelisted` adds is converting previously-tolerated extra fields into `400`s, which is a response-contract change for callers that cannot be surveyed. `INSTRUCTIONS.md` asks for root-cause fixes, not redesign, so take the half that is complete and reversible.
+
+`forbidNonWhitelisted: true` remains the correct end state and should follow a client audit. Recorded as a deliberate deferral, not an omission.
+
+---
+
+## Q3
+<a id="q3"></a>
+
+**Gates** step 2, and step 3 behind it. **Decision: upgrade — add `@keyv/redis`, drop `cache-manager-ioredis-yet`.**
+
+*The question was:* swap to keyv + `@keyv/redis`, or downgrade to `@nestjs/cache-manager` ^2 + `cache-manager` ^5 (the API `cache-manager-ioredis-yet` actually targets)?
+
+*Why this answer:* the installed tree settles it.
+
+```
+@nestjs/cache-manager: 3.1.3       cache-manager: 7.2.9
+cache-manager-ioredis-yet: 2.1.2   <-- targets the cache-manager v5 store API
+keyv: 5.6.0                        <-- already present, transitively via cache-manager 7
+@keyv/redis: not installed
+```
+
+`cache-manager-ioredis-yet` is the wrong generation of adapter for the installed cache-manager: it exposes `del`/`reset` where Keyv-based v7 calls `delete`/`clear`. That mismatch is the second trap named in step 2.
+
+The upgrade adds **one** package and removes one; `keyv` is already in the tree, so this completes a runtime that is already half-present. The downgrade moves `@nestjs/cache-manager` back a major and `cache-manager` back two on a **Nest 11** application — `@nestjs/cache-manager` 3.x is the Nest 11 line, so ^2 invites a peer conflict with `@nestjs/common` 11. Pinning three packages backwards to accommodate one miswired adapter is the wrong direction.
+
+---
+
+## Q7
+<a id="q7"></a>
+
+**Gates** step 4. **Decision: merge duplicate `productId` entries into a single line item, before the stock check.**
+
+*The question was:* should `POST /orders` listing the same `productId` twice be merged into one line item or rejected as a 400? The atomic-decrement fix makes stock correct either way, but the resulting order shape differs and no requirement covers it.
+
+*Why this answer:*
+
+- **Correctness.** Merging must happen *before* validation. Three separate lines of 4 units each validate individually against stock 10 — all pass — and total 12. Per-line-item validation permits overselling inside a single request. Merging up front makes the check see true total quantity.
+- **Customer.** Carts legitimately produce duplicate lines (add an item, navigate away, add it again). An invoice reading `Widget x1, Widget x1, Widget x1` instead of `Widget x3` reads as broken. Rejecting pushes deduplication onto every client and penalises normal behaviour.
+- **Performance.** One atomic `UPDATE` per *distinct* product rather than per line item — strictly fewer round trips.
+
+**Consequence for verification:** the step-4 acceptance test for [D4](01-defect-analysis.md#d4) submits `productId` twice in one order. Had this been answered "reject", that test would start returning `400` at step 9 and silently stop verifying the stock arithmetic. Merging keeps it valid.
+
+---
+
+## Q6
+<a id="q6"></a>
+
+**Gates** steps 5–6. **Decision: make the pay endpoint idempotent with the conditional status flip alone. Do not persist a `transactionId`. No provider contract is available.**
+
+*The question was:* the mock `processPayment(orderId, amount)` has no idempotency-key parameter, so the double-charge risk in the pay path cannot be fully closed inside this codebase. Is the real provider contract available, or should we key off orderId plus a stored transactionId?
+
+*Why this answer:* the provider contract is not available, so nothing keyed on a provider-side idempotency token is implementable here. What *is* implementable is making the state transition conditional (`PENDING` → `CONFIRMED` only): a replayed pay call then finds a non-pending status and returns `400` without re-charging. That is the same conditional-UPDATE mechanism step 5 introduces for [D10](01-defect-analysis.md#d10), and it closes the defect by itself.
+
+**An earlier draft of this decision also persisted the provider's `transactionId` on the order. That half is now dropped**, because it means a new column on the `Order` entity, and `INSTRUCTIONS.md` says *do not add new features or redesign the system*. The stored id would buy an audit trail and a way to recognise a replay after the status has moved on — neither of which any reported symptom asks for. The conditional flip is the root-cause fix; the column is the feature. Keeping the schema untouched also keeps C5 reviewable as a pure behaviour change.
+
+Recorded as a deliberate narrowing, in the same spirit as [Q11](#q11): take the half that fixes the reported defect, leave the half that widens the system.
+
+**State the limit honestly:** this makes the pay *endpoint* idempotent at the API boundary. It cannot make the provider call itself idempotent. If the provider succeeds but its response is lost in flight, the exposure remains. Closing that requires an idempotency key in the provider contract, which is outside this codebase.
+
+---
+
+## Q10
+<a id="q10"></a>
+
+**Gates** step 7, and materially changes its size. **Decision: `parent` is not part of the tree payload. Drop the upward branch.**
+
+*The question was:* is `parent` supposed to appear in the category tree payload at all? If consumers only need the downward subtree, the fix is much smaller than a recursive CTE.
+
+*Why this answer:* `buildCategoryTree` currently recurses in **both** directions — `tree.parent = buildCategoryTree(category.parent)` at products.service.ts:101-103 walks up, `children.map(...)` walks down. Two consequences:
+
+1. **The crash.** `findCategory` loads `relations: ['parent','children','products']` exactly one level deep. The root has `parent` populated, but a *child* has `child.parentId` set and `child.parent` undefined. The `if (category.parentId)` guard passes, `buildCategoryTree(undefined)` runs, and it dies dereferencing `category.id`. That is [D7](01-defect-analysis.md#d7).
+2. **A latent cycle.** Loading relations deeper makes it worse, not better: `parent.children` contains the node you started from, so up-and-down traversal recurses forever. The one-level-deep load is the only reason it currently terminates.
+
+`parent` is therefore structurally incompatible with a tree walk in the same function. A "category tree" should be its descendants.
+
+**The fix, in order:**
+1. Delete the `parent` branch at products.service.ts:101-103.
+2. If a breadcrumb is genuinely required later, return it as a **flat** `path: [{id,name},...]` built by walking ancestors iteratively. Flat cannot cycle.
+3. Load the subtree properly — TreeRepository or a recursive CTE, with a visited-set and a depth cap. This addresses the incompleteness the crash was hiding.
+4. Drop the unused `products` relation in the same pass ([D27](01-defect-analysis.md#d27), free).
+
+**Verification trap:** with the seeded `Electronics → Laptops → Gaming` chain, a tree on Electronics must show **Gaming nested under Laptops**. The one-line `if (category.parent)` guard stops the crash but returns Gaming missing — which looks like a pass. Assert on depth, not on absence of a 500.
+
+---
+
+## Q5
+<a id="q5"></a>
+
+**Gates** step 9. **Decision: 409 Conflict. Keep hard delete; do not adopt soft-delete.**
+
+*The question was:* delete semantics for referenced rows — 409 Conflict, or soft-delete via the existing `Product.isAvailable` / `User.isActive` columns? Both columns already exist and are unused by any endpoint, which hints soft-delete was the intent — but that changes what every list/search endpoint must filter on.
+
+*Why this answer:* the reported symptom is *"some failures produce vague or misleading error messages."* Catching `QueryFailedError`, switching on SQLSTATE `23503`, and returning `409 Cannot delete product referenced by existing orders` fixes exactly that symptom, in the same commit as the other FK/unique mappings.
+
+Soft-delete solves a different problem — one nobody reported — and its cost is not local: every list, search, and findOne path must begin filtering on the flag, or "deleted" rows keep appearing everywhere. That is the redesign `INSTRUCTIONS.md` rules out.
+
+The unused `isAvailable` / `isActive` columns are recorded as an observation about probable original intent, not as an action. Adopting soft-delete is a product decision for a later cycle.
+
+---
+
+## Q8
+<a id="q8"></a>
+
+**Gates** step 10. **Decision: a hard internal `take` cap. No pagination parameters, no index.**
+
+*The question was:* should product search be paginated, and does the DB owner accept a trigram/GIN index on `products(name, description)`? An earlier draft marked this moot, because step 10 was out of scope entirely. [D12](01-defect-analysis.md#d12) has since moved in as [C10](04-scope.md#c10-search-scans-the-whole-products-table), so the question is live again — but only the narrow half of it.
+
+*Why this answer:* the three parts come apart cleanly.
+
+- **The bound is in.** A hard `take` cap inside the service is not a contract change: the route still returns a bare JSON array, callers see nothing new, and today's unbounded result set was never a promise anyone could rely on. It is the half that stops the endpoint returning the whole table.
+- **Pagination parameters are out.** `skip`/`limit` query params plus an envelope *are* a contract change, and that is [D16](01-defect-analysis.md#d16), still out of scope.
+- **The index is out.** It needs no owner's sign-off to be a bad fit here: with `synchronize: true` and no migrations, an `@Index` would arrive as auto-DDL on boot — a schema change smuggled inside a query fix. The `ILIKE` predicate alone removes the O(table) hydration into Node, which is the actual defect. Indexing is the follow-up that makes the SQL fast; it is not what makes the endpoint correct.
+
+Revisit the index and pagination together, behind the client audit that [Q11](#q11) already defers `forbidNonWhitelisted` behind.
+
+---
+
+<a id="part-b"></a>
+## Part B — Resolved or non-blocking
+
+Recorded because they document the investigation. None of them gates a fix.
+
+## Q1
+<a id="q1"></a>
+
+**Coverage claim — no decision required.** All five reported symptoms map to at least one confirmed defect; no symptom is left unexplained. The thinnest mapping is "cache behavior does not match expectations", carried entirely by the four defects in the cache theme. If operators report cache anomalies that survive step 3, that is a signal something beyond these four is in play.
+
+## Q2
+<a id="q2"></a>
+
+**Already answered — this is a correction to the framing we were given, not an open question.** Broken Redis wiring does NOT fully mask the cache-key collision. Because `@nestjs/cache-manager` falls back to an in-process Keyv (not a no-op), `GET /products/search?q=laptop` followed by `?q=shoes` reproduces the wrong-results bug TODAY within a single process. What the wiring defect actually masks is (a) the `db: 0` defect, entirely; (b) persistence across restarts — under `nest start --watch` every file save wipes the cache, which is why the bug reads as intermittent; (c) all cross-instance staleness; and (d) any redis-cli-based verification of a fix. The step ordering stands; the design doc should state the masking precisely rather than claiming the key bug cannot reproduce.
+
+## Q4
+<a id="q4"></a>
+
+**A test to run during step 2, not a decision to obtain.** Does switching to a real serializing Redis store break `UsersService.remove()`? users.service.ts:53-55 loads the user via the cached `findOne` and passes it to `usersRepository.remove(user)`. Today that is a live entity instance; after step 2 it is a deserialized plain object with `createdAt` as a string. Must be exercised explicitly as part of step 2 — cache a user, delete them, confirm no throw — rather than assumed.
+
+## Q9
+<a id="q9"></a>
+
+**Affects urgency, never content.** Is more than one app instance ever run in production? compose.yaml defines no app service and the README describes a single `pnpm start:dev` process. If single-instance is permanent, the cross-instance half of the cache defect is theoretical and step 2 can be scheduled on cost grounds rather than urgency — but it still gates verification of step 3, so the step ordering is unchanged either way.
