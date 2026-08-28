@@ -18,6 +18,22 @@ const SEARCH_VERSION_KEY = 'product-search:version';
 // under a later version has already expired by then.
 const SEARCH_VERSION_TTL_MS = 24 * 60 * 60 * 1000;
 
+// Bounds the recursive subtree query. categories.parent_id has no cycle
+// constraint, so an unbounded CTE is a hang waiting to happen.
+const MAX_CATEGORY_TREE_DEPTH = 50;
+
+export interface CategoryRow {
+  id: number;
+  name: string;
+  parent_id: number | null;
+}
+
+export interface CategoryTreeNode {
+  id: number;
+  name: string;
+  children: CategoryTreeNode[];
+}
+
 @Injectable()
 export class ProductsService {
   constructor(
@@ -145,27 +161,72 @@ export class ProductsService {
     return this.categoriesRepository.save(category);
   }
 
-  async getCategoryTree(categoryId: number): Promise<any> {
-    const category = await this.findCategory(categoryId);
-    return this.buildCategoryTree(category);
+  async getCategoryTree(categoryId: number): Promise<CategoryTreeNode> {
+    const root = await this.categoriesRepository.findOne({
+      where: { id: categoryId },
+    });
+    if (!root) {
+      throw new NotFoundException(`Category #${categoryId} not found`);
+    }
+
+    // The whole subtree in one query. findCategory loads relations exactly one
+    // level deep, so walking `children` recursively silently stopped at
+    // grandchildren — the crash was hiding an incompleteness bug, and a guard
+    // on the null parent would have fixed the 500 while leaving the tree wrong.
+    //
+    // The depth cap is not decoration: parent_id has no cycle constraint, and a
+    // cycle would make this CTE recurse until the server gave out.
+    const rows: CategoryRow[] = await this.categoriesRepository.query(
+      `WITH RECURSIVE subtree AS (
+         SELECT id, name, parent_id, 0 AS depth
+         FROM categories
+         WHERE id = $1
+         UNION ALL
+         SELECT c.id, c.name, c.parent_id, s.depth + 1
+         FROM categories c
+         JOIN subtree s ON c.parent_id = s.id
+         WHERE s.depth < $2
+       )
+       SELECT id, name, parent_id FROM subtree`,
+      [categoryId, MAX_CATEGORY_TREE_DEPTH],
+    );
+
+    return this.buildCategoryTree(categoryId, rows);
   }
 
-  private buildCategoryTree(category: Category): any {
-    const tree: any = {
-      id: category.id,
-      name: category.name,
-      children: [],
-    };
-
-    if (category.parentId) {
-      tree.parent = this.buildCategoryTree(category.parent);
+  private buildCategoryTree(
+    rootId: number,
+    rows: CategoryRow[],
+  ): CategoryTreeNode {
+    // Visit each id once. Under a cycle the CTE can emit the same row at
+    // several depths, and linking it more than once would rebuild the cycle in
+    // the response.
+    const nodes = new Map<number, CategoryTreeNode>();
+    for (const row of rows) {
+      if (!nodes.has(row.id)) {
+        nodes.set(row.id, { id: row.id, name: row.name, children: [] });
+      }
     }
 
-    if (category.children && category.children.length > 0) {
-      tree.children = category.children.map(child => this.buildCategoryTree(child));
+    const linked = new Set<number>([rootId]);
+    for (const row of rows) {
+      if (linked.has(row.id)) {
+        continue;
+      }
+      const parent =
+        row.parent_id === null ? undefined : nodes.get(row.parent_id);
+      const node = nodes.get(row.id);
+      if (parent && node) {
+        parent.children.push(node);
+        linked.add(row.id);
+      }
     }
 
-    return tree;
+    // `parent` is deliberately absent. buildCategoryTree used to recurse
+    // upwards as well as down, which cannot terminate once relations are loaded
+    // deeply enough for the tree to be complete: a parent's `children` contains
+    // the node you started from. A category tree is its descendants.
+    return nodes.get(rootId)!;
   }
 
   async processProductBatch(productIds: number[]): Promise<{ success: boolean; processed: number }> {
