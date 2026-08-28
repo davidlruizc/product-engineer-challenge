@@ -7,6 +7,17 @@ import { Product } from './product.entity';
 import { Category } from './category.entity';
 import { CreateProductDto, CreateCategoryDto } from './dto/create-product.dto';
 
+// Search results are cached per query, so there is no single key to delete when a
+// product changes. Keyv exposes no wildcard delete, so eviction goes through a
+// version number embedded in every search key: bumping it orphans the whole
+// generation at once, and the orphans age out on their own TTL.
+const SEARCH_TTL_MS = 60000;
+const SEARCH_VERSION_KEY = 'product-search:version';
+// Deliberately far longer than SEARCH_TTL_MS. If the version key ever does expire,
+// reads fall back to version 1 — which is only safe because every entry written
+// under a later version has already expired by then.
+const SEARCH_VERSION_TTL_MS = 24 * 60 * 60 * 1000;
+
 @Injectable()
 export class ProductsService {
   constructor(
@@ -35,34 +46,62 @@ export class ProductsService {
 
   async create(createProductDto: CreateProductDto): Promise<Product> {
     const product = this.productsRepository.create(createProductDto);
-    return this.productsRepository.save(product);
+    const saved = await this.productsRepository.save(product);
+    await this.invalidateSearchCache();
+    return saved;
   }
 
   async updateStock(id: number, quantity: number): Promise<Product> {
     const product = await this.findOne(id);
     product.stock = quantity;
-    return this.productsRepository.save(product);
+    const saved = await this.productsRepository.save(product);
+    await this.invalidateSearchCache();
+    return saved;
   }
 
   async remove(id: number): Promise<void> {
     const product = await this.findOne(id);
     await this.productsRepository.remove(product);
+    await this.invalidateSearchCache();
+  }
+
+  private async getSearchVersion(): Promise<number> {
+    const version = await this.cacheManager.get<number>(SEARCH_VERSION_KEY);
+    if (typeof version === 'number') {
+      return version;
+    }
+    await this.cacheManager.set(SEARCH_VERSION_KEY, 1, SEARCH_VERSION_TTL_MS);
+    return 1;
+  }
+
+  private async invalidateSearchCache(): Promise<void> {
+    const current = await this.getSearchVersion();
+    await this.cacheManager.set(
+      SEARCH_VERSION_KEY,
+      current + 1,
+      SEARCH_VERSION_TTL_MS,
+    );
   }
 
   async searchProducts(query: string): Promise<Product[]> {
-    const cacheKey = 'product-search';
+    // Matching is case-insensitive, so the key is normalised the same way —
+    // 'Laptop' and 'laptop' are one entry, not two.
+    const normalized = query.trim().toLowerCase();
+    const version = await this.getSearchVersion();
+    const cacheKey = `product-search:v${version}:${normalized}`;
+
     const cached = await this.cacheManager.get<Product[]>(cacheKey);
     if (cached) {
       return cached;
     }
 
     const products = await this.productsRepository.find();
-    const results = products.filter(p => 
-      p.name.toLowerCase().includes(query.toLowerCase()) ||
-      (p.description || '').toLowerCase().includes(query.toLowerCase())
+    const results = products.filter(p =>
+      p.name.toLowerCase().includes(normalized) ||
+      (p.description || '').toLowerCase().includes(normalized)
     );
 
-    await this.cacheManager.set(cacheKey, results, 60000);
+    await this.cacheManager.set(cacheKey, results, SEARCH_TTL_MS);
     return results;
   }
 
@@ -118,6 +157,7 @@ export class ProductsService {
           const product = await this.findOne(id);
           product.updatedAt = new Date();
           await this.productsRepository.save(product);
+          await this.invalidateSearchCache();
           processed++;
         } catch (error) {
           console.log('Error processing product');
