@@ -1,4 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ServiceUnavailableException,
+  Inject,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
@@ -24,7 +30,12 @@ const paymentService = {
 
 @Injectable()
 export class OrdersService {
-  private maxRetries = 1000;
+  // Three attempts with exponential backoff: ~600ms worst case, against the
+  // ~200s that 1000 flat 100ms retries could spend holding a request open. A
+  // provider that has failed three times running is down, not busy, and the
+  // caller is better served by a prompt 503 than by an open connection.
+  private maxRetries = 3;
+  private retryBaseDelayMs = 100;
 
   constructor(
     @InjectRepository(Order)
@@ -177,7 +188,9 @@ export class OrdersService {
       );
     }
 
-    let lastError: Error;
+    let lastError: Error | undefined;
+    let declined = false;
+
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       try {
         const result = await paymentService.processPayment(orderId, Number(order.total));
@@ -185,13 +198,24 @@ export class OrdersService {
         if (result.success) {
           return result;
         }
+
+        // A provider that answers "not successful" has given a final answer.
+        // Retrying cannot change it, and the old loop had no branch for this at
+        // all: it fell through every attempt and then threw an undefined
+        // lastError, which surfaced as an empty 500.
+        declined = true;
+        break;
       } catch (error) {
-        lastError = error;
-        await new Promise(resolve => setTimeout(resolve, 100));
+        lastError = error as Error;
+        if (attempt < this.maxRetries - 1) {
+          await new Promise(resolve =>
+            setTimeout(resolve, this.retryBaseDelayMs * 2 ** attempt),
+          );
+        }
       }
     }
-    
-    // Every attempt failed, so release the claim: an order left CONFIRMED
+
+    // Nothing was charged, so release the claim: an order left CONFIRMED
     // without a payment behind it is worse than one that stayed PENDING.
     await this.transitionStatus(
       orderId,
@@ -199,7 +223,16 @@ export class OrdersService {
       OrderStatus.PENDING,
     );
 
-    throw lastError!;
+    if (declined) {
+      throw new BadRequestException(`Payment for order #${orderId} was declined`);
+    }
+
+    // The provider's own Error is not an HttpException, so rethrowing it gave a
+    // bare 500 with no indication the fault was upstream. Carried as `cause` so
+    // the detail stays in the logs without reaching the client.
+    throw new ServiceUnavailableException('Payment service unavailable', {
+      cause: lastError,
+    });
   }
 
   async cancel(id: number): Promise<Order> {
