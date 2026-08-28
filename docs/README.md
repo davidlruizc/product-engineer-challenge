@@ -11,9 +11,15 @@ fixes, so that every code change lands with a stated cause and a way to verify i
 
 | Doc | What's in it |
 |---|---|
+| **[04 — Scope](04-scope.md)** | **Start here.** What we're fixing, what we're deliberately not, and the test used to decide |
 | [01 — Defect Analysis](01-defect-analysis.md) | All 27 confirmed defects: root cause, failure scenario, evidence, proposed fix |
 | [02 — Remediation Plan](02-remediation-plan.md) | The order to fix them in, and why that order is forced |
 | [03 — Open Questions](03-open-questions.md) | Decisions needed from a product/infra owner before some fixes can land |
+
+> **The analysis found more than the assignment asks for.** 27 defects are real; 19
+> of them cause a reported symptom, and land as 6 commits. [04 — Scope](04-scope.md) draws that line and
+> justifies both sides of it. Read it before reading the defect list, or the list
+> reads as a code review rather than an answer to `INSTRUCTIONS.md`.
 
 ## Scoreboard
 
@@ -98,6 +104,10 @@ confirmed defect:
 - [D14](01-defect-analysis.md#d14) PATCH /orders/:id/status accepts any body value: no DTO, no enum validation
 - [D24](01-defect-analysis.md#d24) CreateProductDto validates price/stock as loose numbers
 
+Severity here means **user impact only**, per the rubric in
+[04 — Scope](04-scope.md#severity-rubric). It is not fix order — see
+[02 — Remediation Plan](02-remediation-plan.md).
+
 ## Method
 
 Findings were produced by five independent scans (orders, products, users+cache,
@@ -109,6 +119,30 @@ to 27; **11 were rejected**.
 Line numbers cited by scans that read several small files at once were concatenated
 across those files; every citation in these docs has been re-checked against the
 actual source and corrected.
+
+### Limits of this method
+
+Stated plainly, because they change how much each finding should be trusted:
+
+- **2 of 27 were actually executed.** D1 and D5 were reproduced against the running
+  stack (below). The other 25 rest on reading the installed code plus an adversarial
+  refutation pass — strong, but *argued* rather than *observed*. The `confidence`
+  field on each defect means "the mechanism was traced end to end in the source," not
+  "we ran it."
+- **Severity was originally ungraded.** The first pass asked for
+  `critical|high|medium|low` with no definitions attached, so the initial ratings were
+  model intuition. They have since been re-scored against an explicit
+  [rubric](04-scope.md#severity-rubric).
+- **The scans were partly led.** Each finder was given area-specific hints ("look hard
+  at the retry loop, the cache key, the recursion") drawn from a first read of the
+  code. That speeds things up and biases toward confirming existing hypotheses. The
+  infra scan is the useful counter-example: it contradicted the initial guess about
+  *why* Redis was broken, finding a singular/plural config key rather than the assumed
+  library version incompatibility.
+- **One early claim was wrong and is corrected here.** A first skim called D7 infinite
+  recursion. It is not — `findCategory` loads relations one level deep, so `.parent` is
+  `undefined` on children and the recursion dies on a `TypeError`. That changes the fix
+  from a cycle guard to a proper subtree query.
 
 ## Confirmed by running it
 
