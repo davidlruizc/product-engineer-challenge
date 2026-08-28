@@ -1,10 +1,20 @@
-import { Injectable, NotFoundException, Inject } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  Inject,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { User } from './user.entity';
 import { CreateUserDto } from './dto/create-user.dto';
+import {
+  sqlState,
+  FOREIGN_KEY_VIOLATION,
+  UNIQUE_VIOLATION,
+} from '../common/database-errors';
 
 @Injectable()
 export class UsersService {
@@ -45,14 +55,39 @@ export class UsersService {
 
   async create(createUserDto: CreateUserDto): Promise<User> {
     const user = this.usersRepository.create(createUserDto);
-    const saved = await this.usersRepository.save(user);
+
+    let saved: User;
+    try {
+      saved = await this.usersRepository.save(user);
+    } catch (error) {
+      // email carries a unique constraint, so a duplicate is a business rule
+      // Postgres happens to enforce — not an internal fault.
+      if (sqlState(error) === UNIQUE_VIOLATION) {
+        throw new ConflictException(
+          `User with email ${createUserDto.email} already exists`,
+        );
+      }
+      throw error;
+    }
+
     await this.cacheManager.del('users:all');
     return saved;
   }
 
   async remove(id: number): Promise<void> {
     const user = await this.findOne(id);
-    await this.usersRepository.remove(user);
+
+    try {
+      await this.usersRepository.remove(user);
+    } catch (error) {
+      if (sqlState(error) === FOREIGN_KEY_VIOLATION) {
+        throw new ConflictException(
+          `User #${id} cannot be deleted while they have existing orders`,
+        );
+      }
+      throw error;
+    }
+
     await this.cacheManager.del('users:all');
     await this.cacheManager.del(`user:${id}`);
   }
