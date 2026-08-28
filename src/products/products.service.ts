@@ -6,7 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, ILike, Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Product } from './product.entity';
@@ -23,6 +23,10 @@ import {
 // generation at once, and the orphans age out on their own TTL.
 const SEARCH_TTL_MS = 60000;
 const SEARCH_VERSION_KEY = 'product-search:version';
+// A hard internal cap, not a pagination parameter: the route still returns a
+// bare JSON array and callers see nothing new. Today's unbounded result set was
+// never a promise anyone could rely on.
+const SEARCH_RESULT_LIMIT = 100;
 // Deliberately far longer than SEARCH_TTL_MS. If the version key ever does expire,
 // reads fall back to version 1 — which is only safe because every entry written
 // under a later version has already expired by then.
@@ -36,6 +40,14 @@ export interface CategoryRow {
   id: number;
   name: string;
   parent_id: number | null;
+}
+
+/**
+ * `%` and `_` are wildcards to LIKE but were literal characters to the previous
+ * String.includes() filter. Escaping keeps a search for "50%" meaning "50%".
+ */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (character) => `\\${character}`);
 }
 
 export interface BatchFailure {
@@ -180,11 +192,14 @@ export class ProductsService {
       return cached;
     }
 
-    const products = await this.productsRepository.find();
-    const results = products.filter(p =>
-      p.name.toLowerCase().includes(normalized) ||
-      (p.description || '').toLowerCase().includes(normalized)
-    );
+    // The predicate runs in Postgres now. It used to SELECT every row and filter
+    // in JavaScript, so the cost of a search was the size of the table rather
+    // than the size of the answer, and every cache miss paid it in full.
+    const pattern = `%${escapeLikePattern(normalized)}%`;
+    const results = await this.productsRepository.find({
+      where: [{ name: ILike(pattern) }, { description: ILike(pattern) }],
+      take: SEARCH_RESULT_LIMIT,
+    });
 
     await this.cacheManager.set(cacheKey, results, SEARCH_TTL_MS);
     return results;
