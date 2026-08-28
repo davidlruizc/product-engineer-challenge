@@ -2,7 +2,8 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CacheModule } from '@nestjs/cache-manager';
-import { redisStore } from 'cache-manager-ioredis-yet';
+import Keyv from 'keyv';
+import KeyvRedis from '@keyv/redis';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { UsersModule } from './users/users.module';
@@ -29,14 +30,22 @@ import { Category } from './products/category.entity';
     }),
     CacheModule.registerAsync({
       isGlobal: true,
-      useFactory: async () => ({
-        store: await redisStore({
-          host: process.env.REDIS_HOST || 'localhost',
-          port: parseInt(process.env.REDIS_PORT || '6379', 10),
-          db: 0,
+      // `stores` (plural) is what @nestjs/cache-manager 3.x reads. Passing the
+      // singular `store` leaves options.stores undefined, and cache-manager
+      // silently falls back to a per-process in-memory cache.
+      useFactory: () => {
+        const host = process.env.REDIS_HOST || 'localhost';
+        const port = parseInt(process.env.REDIS_PORT || '6379', 10);
+        const db = parseInt(process.env.REDIS_DB || '0', 10);
+        return {
+          stores: [
+            new Keyv({
+              store: new KeyvRedis(`redis://${host}:${port}/${db}`),
+            }),
+          ],
           ttl: 60000,
-        }),
-      }),
+        };
+      },
     }),
     UsersModule,
     ProductsModule,
