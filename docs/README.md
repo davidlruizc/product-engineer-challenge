@@ -17,8 +17,8 @@ fixes, so that every code change lands with a stated cause and a way to verify i
 | [03 — Open Questions](03-open-questions.md) | The seven decisions that gated the fix plan, each now taken with its reasoning, plus four resolved/non-blocking notes |
 | **[05 — Reproduction Runbook](05-reproduction.md)** | Copy-paste commands to watch each defect fail, with real captured output |
 
-> **The analysis found more than the assignment asks for.** 27 defects are real; 20
-> of them cause a reported symptom, and land as 10 commits. [04 — Scope](04-scope.md) draws that line and
+> **The analysis found more than the assignment asks for.** 27 defects are real; 19
+> of them cause a reported symptom, and land as 9 commits. [04 — Scope](04-scope.md) draws that line and
 > justifies both sides of it. Read it before reading the defect list, or the list
 > reads as a code review rather than an answer to `INSTRUCTIONS.md`.
 
@@ -49,7 +49,6 @@ confirmed defect:
 ### "Some requests are extremely slow or never complete"
 
 - [D11](01-defect-analysis.md#d11) Payment retry loop: maxRetries = 1000 with flat delay and a non-HttpException rethrow
-- [D12](01-defect-analysis.md#d12) searchProducts loads the whole products table and filters in Node
 - [D16](01-defect-analysis.md#d16) Collection endpoints have no pagination and pull the full eager graph
 - [D19](01-defect-analysis.md#d19) POST /products/batch binds an inline structural type, so validation is skipped and the real error is masked
 - [D27](01-defect-analysis.md#d27) getCategoryTree loads every product of the category and never uses them
@@ -128,11 +127,9 @@ Stated plainly, because they change how much each finding should be trusted:
 - ~~**2 of 27 were actually executed.**~~ **Superseded.** Every in-scope defect has
   since been run against the live stack — see
   [05 — Reproduction Runbook](05-reproduction.md), which records real captured output.
-  Of the 20 in-scope defects: **15 reproduced directly, 2 partially (D8 is an
-  intermittent race, D11 needs a forced-failure mock), 2 stand on code inspection
-  alone (D9, D18), and 1 has not been exercised yet (D12, which needs a seeded large
-  table — it moved into scope after the runbook was captured)**. The 7 out-of-scope
-  defects were not re-tested. The
+  Of the 19 in-scope defects: **15 reproduced directly, 2 partially (D8 is an
+  intermittent race, D11 needs a forced-failure mock), and 2 stand on code inspection
+  alone (D9, D18)**. The 8 out-of-scope defects were not re-tested. The
   `confidence` field on each defect still means "the mechanism was traced end to end
   in the source," not "we ran it" — the runbook is the authority on what was observed.
 - **Severity was originally ungraded.** The first pass asked for

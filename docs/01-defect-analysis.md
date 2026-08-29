@@ -288,7 +288,7 @@ src/products/products.service.ts:76 `relations: ['parent', 'children', 'products
 
 ### Proposed fix
 
-Minimal correct fix: guard on the loaded relation rather than the FK column — line 101 becomes `if (category.parent) {`. Proper fix: stop walking both directions from one partially-loaded entity. Give the tree path its own query that loads the subtree it needs (a TypeORM TreeRepository / `@Tree('closure-table')` on Category, or one recursive CTE) and recurse downward over `children` only, carrying a `visited: Set<number>` and a depth cap so a self- or mutually-referential `parent_id` cannot loop. If the ancestor chain is genuinely wanted, walk it iteratively (`while (node.parentId)` with an explicit findOne per hop).
+Minimal correct fix: guard on the loaded relation rather than the FK column — line 101 becomes `if (category.parent) {`. Proper fix: stop walking both directions from one partially-loaded entity. Give the tree path its own query that loads the subtree it needs (a TypeORM TreeRepository / `@Tree('closure-table')` on Category, or one recursive CTE) and recurse downward over `children` only, carrying a `visited: Set<number>` so a row emitted twice cannot be linked twice. A depth bound is deliberately not added: no endpoint can create a cycle in `parent_id`, so it would guard a state the API cannot reach. If the ancestor chain is genuinely wanted, walk it iteratively (`while (node.parentId)` with an explicit findOne per hop).
 
 ### How we'll know it's fixed
 
@@ -484,9 +484,9 @@ src/products/products.controller.ts:16 `return this.productsService.searchProduc
 
 ### Proposed fix
 
-Push the predicate into Postgres and bound the result: `this.productsRepository.find({ where: [{ name: ILike(`%${query}%`) }, { description: ILike(`%${query}%`) }], take: 100 })`. Reject or special-case an empty `q` rather than matching everything.
+Push the predicate into Postgres: `this.productsRepository.find({ where: [{ name: ILike(`%${query}%`) }, { description: ILike(`%${query}%`) }] })`. Note that a `take` bound is *not* part of this — truncating a result set silently is its own defect, and the scope note below withdraws the whole change in any case.
 
-**Scope note.** This defect is in scope as [C10](04-scope.md#c10-search-scans-the-whole-products-table). The commit is the predicate and the bound, nothing else: no `skip`/`offset` parameters (that is a pagination contract, i.e. [D16](#d16), which stays out) and no trigram/GIN index (an index is DDL, and with `synchronize: true` and no migrations it would ride in as a schema change). Both are sensible follow-ups; neither is needed to stop the full-table scan.
+**Scope note — out of scope.** This was briefly promoted to a tenth commit and has been withdrawn. Measured on the seeded dataset the SQL predicate and the JavaScript filter both answer in 6–20ms; the gap only appears after inserting 50,000 synthetic rows, which is a table this system does not have and no user has reported waiting on. That is the definition of latent-at-scale, which [04](04-scope.md#the-in-scope-test) excludes. See [04](04-scope.md#decided-search-scan) for the full reversal.
 
 ### How we'll know it's fixed
 

@@ -11,6 +11,42 @@ This document exists because the analysis found more than the assignment asks fo
 So "is this defect real?" is the wrong question for deciding what to change. The
 right one is below.
 
+## Traceability to `INSTRUCTIONS.md`
+
+The stakeholders reported five symptoms. They did not report defects, and the D- and
+C-numbers used throughout these docs are this investigation's labels, not theirs. So
+the check that matters is the one below: **every commit answers a sentence the
+stakeholders actually wrote**, and every sentence has at least one commit.
+
+| Reported symptom | Commits | Observed on the seeded dataset |
+|---|---|---|
+| "Some requests are extremely slow or never complete" | `c6` | 1000 retries × 100ms flat ≈ 200s while the provider is down; now 3 attempts with backoff, measured max 650ms over 20 calls |
+| "Intermittent errors occur in certain flows" | `c7`, `c9` | `/orders/:id/full` and `/categories/:id/tree` returned 500 on **every** call; all read endpoints now 200 |
+| "Data is sometimes inconsistent or missing" | `c1`, `c3`, `c4`, `c5` | A POST carrying `id` overwrote an existing user; a failed order left an orphan row and consumed stock; 6 concurrent orders against stock 3 now yield exactly 3 sales |
+| "Cache behavior does not match expectations" | `c2`, `c3` | Redis was empty while the app reported hits, and the cache died on restart; keys now live in db 1 and survive a restart |
+| "Some failures produce vague or misleading error messages" | `c7`, `c8`, `c9` | Bare 500s carrying raw constraint names, and a batch returning `success: true` while items failed; now 409/404/400 naming the cause, and per-item failures reported |
+
+Read in the other direction, so no commit is unaccounted for:
+
+| Commit | Symptom it serves |
+|---|---|
+| `c1` validation whitelist | data missing — a create silently performed an update |
+| `c2` redis cache store | cache behaviour |
+| `c3` search cache key | cache behaviour, and wrong data returned |
+| `c4` order transaction + atomic stock | data inconsistent |
+| `c5` cancel/pay state machine | data inconsistent |
+| `c6` payment retry bound | never completes |
+| `c7` read endpoint crashes | intermittent errors, vague messages |
+| `c8` batch error reporting | misleading messages |
+| `c9` error mapping | vague messages |
+
+One commit is weaker than the rest and is flagged rather than smoothed over: **`c6`**.
+Under normal conditions the old 1000-retry loop was fast, because the mock provider
+fails independently at 10% and usually succeeded on the first attempt. The 200-second
+hang needs the provider to be *persistently* down, which could not be reproduced
+without a forced-failure mock. Its claim on "never complete" is real but conditional,
+and that is stated here rather than argued around.
+
 ## The in-scope test
 
 > A defect is in scope only if it **causes one of the five reported symptoms on a
@@ -41,7 +77,7 @@ measures **user impact only**:
 is fixed second, because nothing else in the cache theme can be verified until it
 lands. Ordering lives in [02 — Remediation Plan](02-remediation-plan.md).
 
-## In scope — 20 defects, 10 commits
+## In scope — 19 defects, 9 commits
 
 Listed in **commit order**, matching the steps in
 [02 — Remediation Plan](02-remediation-plan.md). The thematic grouping used in an
@@ -71,8 +107,8 @@ Ships as one change. D18 is inert until D1 lands, and would silently write to th
 wrong logical database the moment it does.
 
 **This commit changes dependencies, not just source.** `@keyv/redis` is not installed
-today, so C2 ships `pnpm add @keyv/redis`, drops `cache-manager-ioredis-yet`, and
-carries a `pnpm-lock.yaml` diff. It is the only commit in the plan that touches the
+today, so C2 ships `pnpm add @keyv/redis`, drops `cache-manager-ioredis-yet` and the
+now-unused `ioredis` that only ever backed it, and carries a `pnpm-lock.yaml` diff. It is the only commit in the plan that touches the
 dependency tree, and it is declared here rather than left for a reviewer to find in
 the lockfile. Why a swap and not a downgrade: [Q3](03-open-questions.md#q3).
 
@@ -101,7 +137,8 @@ because 02 establishes that C5 depends on the atomic stock helper C4 introduces:
 - **C4** — D3 + D4 + D8, one indivisible change to `OrdersService.create()` and
   `ProductsService.updateStock`. Indivisible because awaiting the stock update
   *without* the surrounding transaction makes partial commits more deterministic, not
-  less. Duplicate `productId` entries are merged before the stock check
+  less. Line items are processed in `productId` order so concurrent orders cannot
+  deadlock, but the request's lines are otherwise preserved one for one
   ([Q7](03-open-questions.md#q7)).
 - **C5** — D9 + D10, the order state machine. Both replace a check-then-act with a
   conditional `UPDATE` on `status`, and both reuse the helper from C4. Fixing D10
@@ -163,57 +200,23 @@ is one of the five reported symptoms**, so this is a stated requirement, not pol
 The implementation is a `catch` plus a `switch` on SQLSTATE (23503 / 23505) — not an
 architecture.
 
-### C10. Search scans the whole products table
-
-| # | Defect | Severity |
-|---|---|---|
-| [D12](01-defect-analysis.md#d12) | `searchProducts` SELECTs every product and filters in JavaScript | 🟠 High |
-
-Last commit, and initially cut from scope entirely. The reversal is deliberate, so the
-reasoning on both sides is recorded here.
-
-**The case for leaving it out** was that results are correct today and the seeded
-dataset is nowhere near large enough to feel the scan.
-
-**The case for putting it back is the in-scope test itself.** "Some requests are
-extremely slow or never complete" is a reported symptom, and this is the only defect
-that produces it on an ordinary request. [D11](01-defect-analysis.md#d11) carries that
-symptom only while the payment provider is *persistently* down; under normal conditions
-[05](05-reproduction.md#e-slow--never-completes) measures its cost at one ~200ms retry
-in twelve calls. Shipping C6 as the whole answer would respond to a stakeholder report
-with a fix nobody can observe.
-
-The cache is what made the scan look cheap. Every miss pays full table cost, and until
-C2 lands the cache is a per-process Map that `nest start --watch` wipes on every file
-save — so in the deployment that generated these reports, close to every search was a
-cold miss.
-
-**Scoped tightly**, because the neighbouring performance work stays out: push the
-existing predicate into SQL with `ILike` on `name`/`description` and bound the result
-with `take`. Same route, same response shape, no pagination envelope, no contract
-change. [D16](01-defect-analysis.md#d16) and [D26](01-defect-analysis.md#d26) stay out
-of scope precisely because they *do* change the contract or need a call-site audit.
-
-Severity is 🟠 High per the [rubric](#severity-rubric) — unbounded latency on a normal
-request. The ⚪ Low it carried while out of scope was scored against "this dataset,"
-which is the argument this section rejects.
-
-## Out of scope — 7 defects
+## Out of scope — 8 defects
 
 Real, verified, and deliberately not fixed.
 
 Two of them — D19 and D27 — are nonetheless *touched* by in-scope commits, because
 the in-scope fix cannot land safely without them. They stay listed here because
-neither is a goal and neither would justify a commit alone. The counts hold: 20 in
-scope, 7 out, 27 total.
+neither is a goal and neither would justify a commit alone. The counts hold: 19 in
+scope, 8 out, 27 total.
 
-D12 sat in this table in an earlier draft and has since moved into scope as
-[C10](#c10-search-scans-the-whole-products-table) — the entry below is gone, not
-mislaid.
+D12 moved into scope in an earlier draft and has since moved back out — see
+[Scope decisions taken](#decided-search-scan) for why the reversal was itself
+reversed.
 
 | # | Defect | Why it stays | Severity |
 |---|---|---|---|
-| [D16](01-defect-analysis.md#d16) | No pagination on collection endpoints | Latent at scale; correct on this dataset. Adding a pagination envelope changes the API contract, which the instructions rule out — the internal `take` cap in [C10](#c10-search-scans-the-whole-products-table) does not ([Q8](03-open-questions.md#q8)) | ⚪ Low |
+| [D12](01-defect-analysis.md#d12) | `searchProducts` SELECTs every product and filters in JavaScript | Correct results today, and invisible at this table size — measured at 6–20ms either way on the seeded dataset. Making the gap appear needed 50,000 synthetic rows. No user reported a slow search | ⚪ Low |
+| [D16](01-defect-analysis.md#d16) | No pagination on collection endpoints | Latent at scale; correct on this dataset. Adding a pagination envelope changes the API contract, which the instructions rule out ([Q8](03-open-questions.md#q8)) | ⚪ Low |
 | [D25](01-defect-analysis.md#d25) | `decimal` columns come back as strings | **Not a planted bug.** This is standard TypeORM/pg behaviour. A transformer would change the JSON type of every money field on every read — a breaking change for clients, fixing no reported symptom | ⚪ Low |
 | [D26](01-defect-analysis.md#d26) | `Product.category` is `eager: true` | A join on a 1-row category table. Removing it means auditing every call site for a benefit no user can perceive | ⚪ Low |
 | [D27](01-defect-analysis.md#d27) | Category tree loads products it never uses | Wasteful, invisible. **Not a goal, but changed incidentally by C7** — the D7 subtree rewrite drops the unused `products` relation on its way past. Never worth its own commit | ⚪ Low |
@@ -250,14 +253,32 @@ report uses. It is not a redesign; it is one SQL statement replacing two.
 `affected !== 1` as insufficient stock. Stopping at "minimal" would leave D8 open
 while claiming the orders group was fixed.
 
-### Whether the search scan belongs in scope — **decided: reversed, it does**
+<a id="decided-search-scan"></a>
 
-Originally cut as "latent at scale," now shipped as
-[C10](#c10-search-scans-the-whole-products-table). The argument in full is in that
-section; in one line: "extremely slow or never complete" is a reported symptom, and
-[D11](01-defect-analysis.md#d11) alone answers it only when the payment provider is
-persistently down — which is not the normal-request condition the in-scope test asks
-about. D16 and D26 are unaffected and stay out.
+### Whether the search scan belongs in scope — **decided: no, it stays out**
+
+This one was reversed twice, so both turns are recorded.
+
+**First draft:** out, as "latent at scale."
+**Second draft:** in, shipped as a tenth commit, on the argument that "extremely slow
+or never complete" is a reported symptom and the payment retry bound answers it only
+during a provider outage.
+**Final:** out again, and the tenth commit was removed from the stack.
+
+What settled it was measuring instead of arguing. On the seeded dataset the search
+costs **6–20ms whether the predicate runs in SQL or in JavaScript** — the two are
+indistinguishable. The 520ms-versus-49ms gap that justified the second draft only
+appeared after inserting 50,000 synthetic rows, which is a table this system does not
+have and no user has reported waiting on.
+
+That failed the in-scope test as written at the top of this document: *latent scale
+problems are not reported symptoms*. Keeping it would have meant applying that test to
+D16 and D26 and exempting D12 from it, which is not a scope rule, it is a preference.
+
+[C6](#c6-payment-retry-never-gives-up) therefore carries "extremely slow or never
+complete" alone. Its claim is narrower than the second draft implied — a 1000-iteration
+loop only hangs while the provider is persistently down — and that limit is stated in
+[C6](#c6-payment-retry-never-gives-up) rather than patched over by widening scope.
 
 ### Whether the error-mapping group is required — **decided: keep it in full**
 
@@ -284,11 +305,6 @@ the *Expected* block is the pass condition. The per-defect table in
 [02 — Remediation Plan](02-remediation-plan.md#verification-per-defect) carries the
 same assertions in command form.
 
-One gap to name: [C10](#c10-search-scans-the-whole-products-table) has no captured
-*Observed* block, because D12 entered scope after the runbook was recorded and needs a
-seeded 50k-row table. [05](05-reproduction.md) carries the procedure and marks it
-explicitly as not yet executed.
-
 The honest limit of this approach: it is manual, so it catches a regression only when
 someone re-runs the affected section. The two race-condition fixes (D8, D9) are the
 weakest case — a single green run proves little, since the broken code also passes
@@ -296,6 +312,38 @@ most of the time. Those need the relevant loop run repeatedly, and the structura
 check that the write is genuinely a single conditional `UPDATE`, before being called
 verified.
 
+## What was removed for going beyond the report
+
+Five changes were written, then taken back out, because each one bounded or reshaped
+behaviour that no reported symptom covers. They are listed here rather than quietly
+dropped, so the reversal is as reviewable as the work.
+
+| Removed | Was in | Why it went |
+|---|---|---|
+| The whole search-in-SQL commit | its own tenth commit | Measured at 6–20ms either way on the real dataset — see [above](#decided-search-scan) |
+| `take: 100` on search results | that same commit | Silently truncated results. A search matching 150 products returned 100 with no total and no next-page marker, which is itself "data is sometimes missing" |
+| `ArrayMaxSize(500)` on `/products/batch` | [C8](#c8-batch-reports-success-while-items-fail) | Rejected 501-id batches that work today. No reported symptom involves a large batch |
+| Depth cap of 50 on the category tree | [C7](#c7-two-endpoints-500-on-every-valid-call) | Guards a cycle in `parent_id`, which cannot be produced through this API: `POST /categories` only ever points a new row at an existing one, and nothing reparents a category |
+| Merging duplicate `productId` lines | [C4](#c4-order-writes-lose-and-corrupt-data) | Changed the shape of an order to answer [Q7](03-open-questions.md#q7), a question these docs record as having no requirement behind it. Stock stays correct without it: each line is decremented conditionally, and a combined quantity over stock still rolls the transaction back |
+
+The dependency tidy-up in [C2](#c2-cache-never-reaches-redis) went the other way —
+`ioredis` was left installed by an earlier draft on the grounds that removing it was
+"tidying rather than a root-cause fix." It is now removed, because the commit that
+orphaned it is the commit that should account for it.
+
 ## Status
 
-Nothing has been fixed yet. This is the plan, not a record of work.
+**Nine commits, `c1` through `c9`, one branch each.** Every one traces to a sentence in
+`INSTRUCTIONS.md` via the table at the top of this document, and every one was verified
+against a running stack — Postgres and Redis in Docker, the seeded fixture from
+[05](05-reproduction.md), and the assertions recorded in each commit message.
+
+Two things are deliberately not done, and are decisions rather than omissions:
+
+- **No automated regression suite**, for the reason given above.
+- **`PATCH /orders/:id/status` still permits any transition**, including
+  `cancelled → pending`, which makes a cancelled order payable again. It is noted at
+  [D14](01-defect-analysis.md#d14) and left alone: reaching it needs a client to drive
+  an order backwards through its lifecycle on purpose, so it fails the in-scope test in
+  exactly the way [D23](01-defect-analysis.md#d23) and [D24](01-defect-analysis.md#d24)
+  do. Closing it would also mean inventing transition rules the README never states.

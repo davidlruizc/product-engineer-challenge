@@ -67,7 +67,7 @@ MUTUAL UNMASKING — the retry bound and the error mapping must be one commit. T
 - [D7](01-defect-analysis.md#d7) buildCategoryTree dereferences category.parent, which is never loaded for children
 - [D27](01-defect-analysis.md#d27) getCategoryTree loads every product of the category and never uses them
 
-Two routes that 500 on essentially every valid request; independent of everything above, so they can land any time, but grouped here because both are pure-read crash fixes. UNMASKING INSIDE THIS STEP: the one-line guard `if (category.parent)` stops the TypeError but immediately reveals that grandchildren are silently missing from the tree, because findCategory loads relations exactly one level deep — so the crash was hiding an incompleteness bug. Fix both together by giving the tree path its own subtree query (recursive CTE or TreeRepository) with a visited-set and depth cap, which is also the natural place to drop the unused `products` relation.
+Two routes that 500 on essentially every valid request; independent of everything above, so they can land any time, but grouped here because both are pure-read crash fixes. UNMASKING INSIDE THIS STEP: the one-line guard `if (category.parent)` stops the TypeError but immediately reveals that grandchildren are silently missing from the tree, because findCategory loads relations exactly one level deep — so the crash was hiding an incompleteness bug. Fix both together by giving the tree path its own subtree query (recursive CTE or TreeRepository) with a visited-set, which is also the natural place to drop the unused `products` relation. No depth bound: `POST /categories` only ever points a new row at an existing one and nothing reparents a category, so a cycle is unreachable through the API.
 
 ### Step 8
 
@@ -86,26 +86,20 @@ STRICTLY ORDERED WITHIN THE STEP: the DTO must land before the outer catch is re
 
 The error-mapping sweep — exactly the five defects [04](04-scope.md#c9-raw-driver-errors-reach-the-client) puts in C9. Deliberately after step 1 (whitelist) because tightening individual decorators is only meaningful once undeclared properties are stripped. Deliberately after step 4 because step 4 removes the MECHANISM that turns a bad request into a phantom or orphaned order, so the mapping work lands on a create path that is already transactional. The three FK/unique-violation mappings (products, users, categories, duplicate email) share one pattern and should be one commit: catch the QueryFailedError, switch on SQLSTATE (23503 / 23505), and translate to 409/404 with a business-language message. Delete semantics are settled: hard delete plus a 23503 -> 409 mapping, not soft-delete (see [Q5](03-open-questions.md#q5)).
 
-**[D23](01-defect-analysis.md#d23) and [D24](01-defect-analysis.md#d24) are NOT in this step.** An earlier draft listed them here, which contradicted [04](04-scope.md#out-of-scope--7-defects), where both sit in the out-of-scope table: each needs a malformed request to trigger, so neither meets the in-scope test of *causes a reported symptom on a normal request*. The scope decision governs; this list is corrected to match it. Their rows survive in the [verification table](#verification-per-defect) below, which indexes all 27 defects rather than only the 20 being fixed.
+**[D23](01-defect-analysis.md#d23) and [D24](01-defect-analysis.md#d24) are NOT in this step.** An earlier draft listed them here, which contradicted [04](04-scope.md#out-of-scope--8-defects), where both sit in the out-of-scope table: each needs a malformed request to trigger, so neither meets the in-scope test of *causes a reported symptom on a normal request*. The scope decision governs; this list is corrected to match it. Their rows survive in the [verification table](#verification-per-defect) below, which indexes all 27 defects rather than only the 19 being fixed.
 
-### Step 10
-
-- [D12](01-defect-analysis.md#d12) searchProducts loads the whole products table and filters in Node
-
-IN SCOPE — moved in from the deferred set; the reasoning is in [04 — Scope](04-scope.md#c10-search-scans-the-whole-products-table). It is the last in-scope commit and it sits after step 3 for a concrete reason: it rewrites the body of the same `searchProducts` function whose key scheme step 3 settles, and it is not measurable until the cache is real — with the per-process fallback, `nest start --watch` wipes the cache on every file save, so every timing run is a cold miss by accident rather than by design. Scope is exactly the predicate and the bound: `ILike` on name/description plus a `take`. Deliberately NOT a pagination envelope — that is D16, which stays out, and mixing the two would turn a root-cause fix into a contract change.
-
-### Step 11 — deferred, not in scope
+### Step 10 — deferred, not in scope
 
 - [D16](01-defect-analysis.md#d16) Collection endpoints have no pagination and pull the full eager graph
 - [D26](01-defect-analysis.md#d26) Product.category is eager: true, forcing a categories join on every product read
 
-OUT OF SCOPE (see [04](04-scope.md#out-of-scope--7-defects)); kept in the ordering because if they are ever picked up, the sequence still matters. Both change response shapes and API contracts (pagination envelopes, capped result counts) and are far safer to land once correctness is settled and there is a regression suite behind steps 1-10. Push the search predicate into SQL (step 10) BEFORE removing the eager flag, so you can confirm from query logs that the join disappearing is the eager change and not the new WHERE clause. Removing `eager: true` requires auditing every call site that currently gets `category` for free — products.service.ts:22 and :28 already request it explicitly, but nested loads through `items.product` do not.
+OUT OF SCOPE (see [04](04-scope.md#out-of-scope--8-defects)); kept in the ordering because if they are ever picked up, the sequence still matters. Both change response shapes and API contracts (pagination envelopes, capped result counts) and are far safer to land once correctness is settled and there is a regression suite behind steps 1-9. [D12](01-defect-analysis.md#d12) sits with them now: it was briefly promoted to a tenth commit and has been withdrawn again, because on the real dataset the SQL predicate and the JavaScript filter measure the same — see [04](04-scope.md#decided-search-scan). Removing `eager: true` requires auditing every call site that currently gets `category` for free — products.service.ts:22 and :28 already request it explicitly, but nested loads through `items.product` do not.
 
-### Step 12
+### Step 11
 
 - [D25](01-defect-analysis.md#d25) Decimal columns come back from Postgres as strings
 
-Genuinely last, and out of scope (see [04](04-scope.md#out-of-scope--7-defects)). Adding a transformer changes the JSON type of every money field on every read (`"19.99"` → `19.99`) across products, orders and order items simultaneously — a breaking change for any client currently string-handling those values, and it makes the `Number(order.total)` cast at orders.service.ts:110 dead code. It fixes no crash and no data loss on its own, so it should follow a client-coordination window rather than lead one. Doing it earlier would also churn the expected values in every test written for steps 4-10.
+Genuinely last, and out of scope (see [04](04-scope.md#out-of-scope--8-defects)). Adding a transformer changes the JSON type of every money field on every read (`"19.99"` → `19.99`) across products, orders and order items simultaneously — a breaking change for any client currently string-handling those values, and it makes the `Number(order.total)` cast at orders.service.ts:110 dead code. It fixes no crash and no data loss on its own, so it should follow a client-coordination window rather than lead one. Doing it earlier would also churn the expected values in every test written for steps 4-9.
 
 
 <a id="verification-per-defect"></a>

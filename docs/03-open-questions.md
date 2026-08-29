@@ -18,11 +18,11 @@ code. Q-numbers are unchanged from the first draft; cross-references still resol
 |---|---|---|---|
 | [Q11](#q11) | `whitelist` vs `forbidNonWhitelisted` | Step 1 | `whitelist: true` alone |
 | [Q3](#q3) | Which Redis remediation path | Step 2 | Upgrade — keyv + `@keyv/redis` |
-| [Q7](#q7) | Duplicate `productId` in one order | Step 4 | Merge into one line item |
+| [Q7](#q7) | Duplicate `productId` in one order | Step 4 | Leave the lines as sent |
 | [Q6](#q6) | Payment idempotency | Steps 5–6 | Conditional status flip only — no new column |
 | [Q10](#q10) | Is `parent` needed in the tree payload | Step 7 | No — drop it; flat `path` if needed |
 | [Q5](#q5) | Delete semantics for referenced rows | Step 9 | 409 Conflict, not soft-delete |
-| [Q8](#q8) | Search bound, pagination and index | Step 10 | Hard `take` cap only |
+| [Q8](#q8) | Search bound, pagination and index | — | Moot again; search stays out of scope |
 
 ---
 
@@ -64,17 +64,17 @@ The upgrade adds **one** package and removes one; `keyv` is already in the tree,
 ## Q7
 <a id="q7"></a>
 
-**Gates** step 4. **Decision: merge duplicate `productId` entries into a single line item, before the stock check.**
+**Gates** step 4. **Decision: leave the request's line items exactly as sent. Do not merge, do not reject.**
 
 *The question was:* should `POST /orders` listing the same `productId` twice be merged into one line item or rejected as a 400? The atomic-decrement fix makes stock correct either way, but the resulting order shape differs and no requirement covers it.
 
-*Why this answer:*
+*Why this answer:* the last clause of the question is the answer. **No requirement covers it, and no reported symptom involves it.** An earlier draft chose to merge, on grounds that were about invoice aesthetics ("`Widget x1` three times reads as broken") and a marginal saving in round trips. Neither is a defect anybody reported, and merging changes what comes back from a create — a request that used to produce two rows produced one.
 
-- **Correctness.** Merging must happen *before* validation. Three separate lines of 4 units each validate individually against stock 10 — all pass — and total 12. Per-line-item validation permits overselling inside a single request. Merging up front makes the check see true total quantity.
-- **Customer.** Carts legitimately produce duplicate lines (add an item, navigate away, add it again). An invoice reading `Widget x1, Widget x1, Widget x1` instead of `Widget x3` reads as broken. Rejecting pushes deduplication onto every client and penalises normal behaviour.
-- **Performance.** One atomic `UPDATE` per *distinct* product rather than per line item — strictly fewer round trips.
+Correctness does not need it. Each line is decremented with its own conditional `UPDATE` inside the transaction, so two lines of 6 against stock 5 fail on the second and roll the whole thing back. Verified: `[{id:1,qty:6},{id:1,qty:6}]` against stock 5 returns `400 Not enough stock for Laptop` and leaves stock at 5, while `[{id:1,qty:2},{id:1,qty:3}]` writes two rows and decrements by 5.
 
-**Consequence for verification:** the step-4 acceptance test for [D4](01-defect-analysis.md#d4) submits `productId` twice in one order. Had this been answered "reject", that test would start returning `400` at step 9 and silently stop verifying the stock arithmetic. Merging keeps it valid.
+What step 4 *does* keep is processing lines in `productId` order. That is not cosmetic: without a consistent lock order, two concurrent orders touching the same two products in opposite order can deadlock in Postgres, which would surface as a 500 on a normal request.
+
+**Consequence for verification:** the step-4 acceptance test for [D4](01-defect-analysis.md#d4) submits `productId` twice in one order. That stays valid — the request is still accepted, and now asserts two line items and a combined decrement rather than one merged line.
 
 ---
 
@@ -112,7 +112,7 @@ Recorded as a deliberate narrowing, in the same spirit as [Q11](#q11): take the 
 **The fix, in order:**
 1. Delete the `parent` branch at products.service.ts:101-103.
 2. If a breadcrumb is genuinely required later, return it as a **flat** `path: [{id,name},...]` built by walking ancestors iteratively. Flat cannot cycle.
-3. Load the subtree properly — TreeRepository or a recursive CTE, with a visited-set and a depth cap. This addresses the incompleteness the crash was hiding.
+3. Load the subtree properly — TreeRepository or a recursive CTE, with a visited-set. This addresses the incompleteness the crash was hiding. No depth bound, since no endpoint can produce a cycle in `parent_id`.
 4. Drop the unused `products` relation in the same pass ([D27](01-defect-analysis.md#d27), free).
 
 **Verification trap:** with the seeded `Electronics → Laptops → Gaming` chain, a tree on Electronics must show **Gaming nested under Laptops**. The one-line `if (category.parent)` guard stops the crash but returns Gaming missing — which looks like a pass. Assert on depth, not on absence of a 500.
@@ -137,17 +137,15 @@ The unused `isAvailable` / `isActive` columns are recorded as an observation abo
 ## Q8
 <a id="q8"></a>
 
-**Gates** step 10. **Decision: a hard internal `take` cap. No pagination parameters, no index.**
+**Gates** nothing any more. **Decision: moot — search is out of scope, so there is no bound, no pagination and no index.**
 
-*The question was:* should product search be paginated, and does the DB owner accept a trigram/GIN index on `products(name, description)`? An earlier draft marked this moot, because step 10 was out of scope entirely. [D12](01-defect-analysis.md#d12) has since moved in as [C10](04-scope.md#c10-search-scans-the-whole-products-table), so the question is live again — but only the narrow half of it.
+*The question was:* should product search be paginated, and does the DB owner accept a trigram/GIN index on `products(name, description)`?
 
-*Why this answer:* the three parts come apart cleanly.
+*Why this answer:* an earlier draft marked this moot because search was out of scope, then reopened it when [D12](01-defect-analysis.md#d12) was promoted to a tenth commit. That promotion has been withdrawn — the predicate measures the same in SQL and in JavaScript at this table size — so the question closes the way it opened.
 
-- **The bound is in.** A hard `take` cap inside the service is not a contract change: the route still returns a bare JSON array, callers see nothing new, and today's unbounded result set was never a promise anyone could rely on. It is the half that stops the endpoint returning the whole table.
-- **Pagination parameters are out.** `skip`/`limit` query params plus an envelope *are* a contract change, and that is [D16](01-defect-analysis.md#d16), still out of scope.
-- **The index is out.** It needs no owner's sign-off to be a bad fit here: with `synchronize: true` and no migrations, an `@Index` would arrive as auto-DDL on boot — a schema change smuggled inside a query fix. The `ILIKE` predicate alone removes the O(table) hydration into Node, which is the actual defect. Indexing is the follow-up that makes the SQL fast; it is not what makes the endpoint correct.
+The intermediate answer was "a hard internal `take` cap, on the grounds that it is not a contract change." That reasoning does not survive contact with the endpoint: a search matching 150 products returned 100, with no total and no next-page marker. For any caller with more matches than the cap, the response silently changed — and silently dropping rows is the same "data is sometimes missing" the report complains about. The cap went out with the commit.
 
-Revisit the index and pagination together, behind the client audit that [Q11](#q11) already defers `forbidNonWhitelisted` behind.
+If search ever does need bounding, pagination and the index should be revisited together, behind the same client audit that [Q11](#q11) defers `forbidNonWhitelisted` behind.
 
 ---
 

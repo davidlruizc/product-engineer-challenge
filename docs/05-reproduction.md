@@ -480,42 +480,6 @@ one request hang. Revert afterwards.
 
 ---
 
-### D12 — Search scans the whole table  🔍 not yet executed
-
-**Status: procedure only.** D12 moved into scope
-([C10](04-scope.md#c10-search-scans-the-whole-products-table)) after this runbook was
-captured, and demonstrating it needs a table this stack was never seeded to have.
-Everything else in this file is real captured output; this section is not. Marked
-rather than quietly folded in.
-
-```bash
-# seed ~50k products
-docker exec challenge-db psql -U postgres -d challengedb -c   "INSERT INTO products (name, description, price, stock, is_available)
-   SELECT 'bulk-'||g, 'filler', 9.99, 100, true FROM generate_series(1,50000) g;"
-
-# cold cache, then time a search that matches almost nothing
-docker exec challenge-redis redis-cli -n 1 FLUSHDB
-time curl -s 'localhost:3000/products/search?q=zzzz' | jq length
-```
-
-**Expected before the fix:** every request that misses the cache runs
-`SELECT * FROM products` with the eager categories join, hydrates 50k entities, and
-filters them in the event loop to return a handful of rows — hundreds of milliseconds
-to seconds, and the event loop blocked for the duration. `q=` (empty) is the worse
-case: `includes('')` matches every row, so the whole table is serialized into the
-response *and* into the cache entry.
-
-**Expected after C10:** tens of milliseconds, with `ILIKE` and `LIMIT` visible in the
-SQL once `logging: ['query']` is enabled on the TypeORM config, and no
-`SELECT * FROM products` without a WHERE clause.
-
-**Why this matters more than the numbers suggest** — the timing above is the *cold
-miss* cost, and until [C2](04-scope.md#c2-cache-never-reaches-redis) lands nearly
-every request is a cold miss: the fallback cache is per-process and `nest start
---watch` wipes it on every file save. See [D1](#d1--the-cache-never-reaches-redis).
-
----
-
 ## Summary — what was actually observed
 
 | Defect | Status |
