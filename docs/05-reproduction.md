@@ -220,9 +220,9 @@ call reads stock before any of them writes. This is the same lost-update mechani
 it lands every time where D8 needs a lucky interleaving.
 
 Note this repro depends on duplicate `productId` entries being accepted, which
-[Q7](03-open-questions.md#q7) settles as *merge, not reject*. If that had been decided
-the other way, this construction would start returning 400 and silently stop testing
-anything.
+[Q7](03-open-questions.md#q7) settles by leaving the request's line items exactly as
+sent — neither merged nor rejected. If that had been decided the other way, this
+construction would start returning 400 and silently stop testing anything.
 
 ---
 
@@ -503,16 +503,19 @@ one request hang. Revert afterwards.
 | [D11](01-defect-analysis.md#d11) Unbounded retry | ⚠️ Retry observed; exhaustion needs a forced-failure mock |
 | [D9](01-defect-analysis.md#d9) Non-atomic cancel | 🔍 By inspection — same race class as D8 |
 | [D18](01-defect-analysis.md#d18) `db: 0` over `REDIS_DB` | 🔍 By inspection — inert until D1 is fixed |
-| [D12](01-defect-analysis.md#d12) Search scans the whole table | 🔍 Not yet executed — moved into scope after this capture; needs a seeded 50k table |
+| [D12](01-defect-analysis.md#d12) Search scans the whole table | ⚪ Out of scope — measured at 6–20ms either way on this dataset |
 
-**15 of 20 reproduced directly, 2 partially, 2 by code inspection, 1 not yet executed.**
+**15 of 20 reproduced directly, 2 partially, 2 by code inspection, 1 out of scope.**
 
 D4 moved from "by inspection" to reproduced after the five-line-item construction
 above was found. The two remaining inspection-only defects are D9 (needs concurrent
 cancels; same mechanism as D8, already demonstrated) and D18 (100% masked by D1 —
 nothing reaches Redis, so the `db` index has no effect to observe until C2 lands).
-D12 is a separate case: not masked and not inspection-only, simply not yet run,
-because it entered scope after this capture and needs a seeded table.
+D12 is a separate case: it was briefly promoted to a tenth commit and then moved
+back out. Measuring settled it — on this dataset the search costs 6–20ms whether
+the predicate runs in SQL or in JavaScript, and the gap that justified the
+promotion only appeared after inserting 50,000 synthetic rows. See
+[04](04-scope.md#decided-search-scan).
 
 This supersedes the earlier caveat in the [README](README.md#limits-of-this-method)
 that only 2 of 27 defects had been executed.

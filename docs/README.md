@@ -26,10 +26,10 @@ fixes, so that every code change lands with a stated cause and a way to verify i
 
 | Severity | Count |
 |---|---|
-| 🔴 Critical | 7 |
+| 🔴 Critical | 5 |
 | 🟠 High | 8 |
-| 🟡 Medium | 10 |
-| ⚪ Low | 2 |
+| 🟡 Medium | 6 |
+| ⚪ Low | 8 |
 | **Total** | **27** |
 
 Grouped into 6 themes:

@@ -1,7 +1,9 @@
 # 01 — Defect Analysis
 
-27 confirmed defects, ranked by severity then blast radius. Each was
-adversarially verified against the actual source.
+27 confirmed defects, numbered in the order they were confirmed. Each was
+adversarially verified against the actual source. Severity is scored against
+the rubric in [04 — Scope](04-scope.md#severity-rubric), which measures user
+impact only and is the single authority for these grades.
 
 Confidence is the verifier's, not the finder's: **certain** means the mechanism was
 traced end to end in the installed code; **likely** means the mechanism is sound but
@@ -11,31 +13,31 @@ one link rests on documented library behaviour rather than a read of the code.
 
 | # | Severity | Defect | Location |
 |---|---|---|---|
-| [D1](#d1) | 🔴 Critical | Redis cache store never wired: `store` vs `stores` silently falls back to an in-process Map | `src/app.module.ts` |
+| [D1](#d1) | 🟠 High | Redis cache store never wired: `store` vs `stores` silently falls back to an in-process Map | `src/app.module.ts` |
 | [D2](#d2) | 🔴 Critical | Global ValidationPipe has no whitelist: POST bodies mass-assign entity columns and turn create into UPDATE | `src/main.ts` |
 | [D3](#d3) | 🔴 Critical | Order creation is non-transactional: mid-loop failure leaves orphaned order and partial items | `src/orders/orders.service.ts` |
 | [D4](#d4) | 🔴 Critical | Stock decrement is a floating promise: updateStock is never awaited in create() | `src/orders/orders.service.ts` |
-| [D5](#d5) | 🔴 Critical | searchProducts uses one constant cache key for every query | `src/products/products.service.ts` |
+| [D5](#d5) | 🟠 High | searchProducts uses one constant cache key for every query | `src/products/products.service.ts` |
 | [D6](#d6) | 🔴 Critical | GET /orders/:id/full builds a self-referential graph and JSON.stringify's it | `src/orders/orders.service.ts` |
 | [D7](#d7) | 🔴 Critical | buildCategoryTree dereferences category.parent, which is never loaded for children | `src/products/products.service.ts` |
 | [D8](#d8) | 🟠 High | updateStock is a non-atomic absolute-value read-modify-write: lost updates and oversell | `src/products/products.service.ts` |
 | [D9](#d9) | 🟠 High | cancel() restores stock non-atomically and non-idempotently | `src/orders/orders.service.ts` |
 | [D10](#d10) | 🟠 High | processPayment has no order-status guard: cancelled orders are resurrected and double-charged | `src/orders/orders.service.ts` |
 | [D11](#d11) | 🟠 High | Payment retry loop: maxRetries = 1000 with flat delay and a non-HttpException rethrow | `src/orders/orders.service.ts` |
-| [D12](#d12) | 🟠 High | searchProducts loads the whole products table and filters in Node | `src/products/products.service.ts` |
+| [D12](#d12) | ⚪ Low | searchProducts loads the whole products table and filters in Node | `src/products/products.service.ts` |
 | [D13](#d13) | 🟠 High | processProductBatch swallows per-item errors and always reports success: true | `src/products/products.service.ts` |
-| [D14](#d14) | 🟠 High | PATCH /orders/:id/status accepts any body value: no DTO, no enum validation | `src/orders/orders.controller.ts` |
-| [D15](#d15) | 🟠 High | DELETE on referenced products/users leaks a raw Postgres FK violation as a 500 | `src/products/products.service.ts` |
-| [D16](#d16) | 🟡 Medium | Collection endpoints have no pagination and pull the full eager graph | `src/orders/orders.service.ts` |
-| [D17](#d17) | 🟡 Medium | No product write path invalidates the product-search cache | `src/products/products.service.ts` |
+| [D14](#d14) | 🟡 Medium | PATCH /orders/:id/status accepts any body value: no DTO, no enum validation | `src/orders/orders.controller.ts` |
+| [D15](#d15) | 🟡 Medium | DELETE on referenced products/users leaks a raw Postgres FK violation as a 500 | `src/products/products.service.ts` |
+| [D16](#d16) | ⚪ Low | Collection endpoints have no pagination and pull the full eager graph | `src/orders/orders.service.ts` |
+| [D17](#d17) | 🟠 High | No product write path invalidates the product-search cache | `src/products/products.service.ts` |
 | [D18](#d18) | 🟡 Medium | Redis db index hardcoded to 0, ignoring REDIS_DB=1 | `src/app.module.ts` |
-| [D19](#d19) | 🟡 Medium | POST /products/batch binds an inline structural type, so validation is skipped and the real error is masked | `src/products/products.controller.ts` |
+| [D19](#d19) | ⚪ Low | POST /products/batch binds an inline structural type, so validation is skipped and the real error is masked | `src/products/products.controller.ts` |
 | [D20](#d20) | 🟡 Medium | GET /orders?userId=<non-numeric> yields NaN in the WHERE clause and a 500 | `src/orders/orders.controller.ts` |
 | [D21](#d21) | 🟡 Medium | Duplicate-email user creation surfaces as a bare 500 instead of 409 | `src/users/users.service.ts` |
 | [D22](#d22) | 🟡 Medium | Dangling categoryId/parentId is caught by Postgres, not the API, producing a raw 500 | `src/products/dto/create-product.dto.ts` |
-| [D23](#d23) | 🟡 Medium | CreateOrderDto accepts an empty items array and non-integer productId/quantity | `src/orders/dto/create-order.dto.ts` |
-| [D24](#d24) | 🟡 Medium | CreateProductDto validates price/stock as loose numbers | `src/products/dto/create-product.dto.ts` |
-| [D25](#d25) | 🟡 Medium | Decimal columns come back from Postgres as strings | `src/products/product.entity.ts` |
+| [D23](#d23) | ⚪ Low | CreateOrderDto accepts an empty items array and non-integer productId/quantity | `src/orders/dto/create-order.dto.ts` |
+| [D24](#d24) | ⚪ Low | CreateProductDto validates price/stock as loose numbers | `src/products/dto/create-product.dto.ts` |
+| [D25](#d25) | ⚪ Low | Decimal columns come back from Postgres as strings | `src/products/product.entity.ts` |
 | [D26](#d26) | ⚪ Low | Product.category is eager: true, forcing a categories join on every product read | `src/products/product.entity.ts` |
 | [D27](#d27) | ⚪ Low | getCategoryTree loads every product of the category and never uses them | `src/products/products.service.ts` |
 
@@ -46,7 +48,7 @@ one link rests on documented library behaviour rather than a read of the code.
 
 | | |
 |---|---|
-| **Severity** | 🔴 Critical |
+| **Severity** | 🟠 High |
 | **Theme** | Cache correctness & wiring |
 | **Location** | `src/app.module.ts` |
 | **Confidence** | certain |
@@ -186,7 +188,7 @@ Contrast :135 `await this.productsService.updateStock(product.id, product.stock 
 
 | | |
 |---|---|
-| **Severity** | 🔴 Critical |
+| **Severity** | 🟠 High |
 | **Theme** | Cache correctness & wiring |
 | **Location** | `src/products/products.service.ts` |
 | **Confidence** | certain |
@@ -457,7 +459,7 @@ Temporarily set the mock's failure probability to 1 (`if (true) throw ...` at li
 
 | | |
 |---|---|
-| **Severity** | 🟠 High |
+| **Severity** | ⚪ Low |
 | **Theme** | Unbounded & wasted work |
 | **Location** | `src/products/products.service.ts` |
 | **Confidence** | certain |
@@ -545,7 +547,7 @@ Collect failures instead of dropping them: `const failed: { id: number; reason: 
 
 | | |
 |---|---|
-| **Severity** | 🟠 High |
+| **Severity** | 🟡 Medium |
 | **Theme** | Input validation & mass assignment |
 | **Location** | `src/orders/orders.controller.ts` |
 | **Confidence** | certain |
@@ -586,7 +588,7 @@ Add `class UpdateOrderStatusDto { @IsEnum(OrderStatus) status: OrderStatus; }` a
 
 | | |
 |---|---|
-| **Severity** | 🟠 High |
+| **Severity** | 🟡 Medium |
 | **Theme** | Error handling & diagnosability |
 | **Location** | `src/products/products.service.ts` |
 | **Confidence** | certain |
@@ -620,7 +622,7 @@ Place an order for product P by user U, then `curl -i -s -X DELETE localhost:300
 
 | | |
 |---|---|
-| **Severity** | 🟡 Medium |
+| **Severity** | ⚪ Low |
 | **Theme** | Unbounded & wasted work |
 | **Location** | `src/orders/orders.service.ts` |
 | **Confidence** | certain |
@@ -660,7 +662,7 @@ Add mandatory pagination driven by validated query params with a sane default an
 
 | | |
 |---|---|
-| **Severity** | 🟡 Medium |
+| **Severity** | 🟠 High |
 | **Theme** | Cache correctness & wiring |
 | **Location** | `src/products/products.service.ts` |
 | **Confidence** | likely |
@@ -735,7 +737,7 @@ src/app.module.ts:36 → `db: parseInt(process.env.REDIS_DB || '0', 10),`. If ap
 
 | | |
 |---|---|
-| **Severity** | 🟡 Medium |
+| **Severity** | ⚪ Low |
 | **Theme** | Input validation & mass assignment |
 | **Location** | `src/products/products.controller.ts` |
 | **Confidence** | certain |
@@ -761,11 +763,11 @@ src/products/products.service.ts:116 `for (const id of productIds) {` inside the
 
 ### Proposed fix
 
-Declare `class ProcessBatchDto { @IsArray() @ArrayNotEmpty() @ArrayMaxSize(500) @IsInt({ each: true }) @Min(1, { each: true }) productIds: number[]; }` and bind `@Body() body: ProcessBatchDto`, so the global pipe rejects a bad body with a field-level 400 before the service runs and the length cap bounds the work. Load the ids in one `In(productIds)` query instead of per-id `findOne`.
+Declare `class ProcessBatchDto { @IsArray() @IsInt({ each: true }) productIds: number[]; }` and bind `@Body() body: ProcessBatchDto`, so the global pipe rejects a malformed body with a field-level 400 before the service runs. No `@ArrayNotEmpty` and no `@ArrayMaxSize`: both would reject requests that work today, and [04](04-scope.md) records them as removed for going beyond the report. Load the ids in one `In(productIds)` query instead of per-id `findOne`.
 
 ### How we'll know it's fixed
 
-`curl -i -s -X POST localhost:3000/products/batch -H 'content-type: application/json' -d '{}'` must return 400 with `productIds should not be empty` / `productIds must be an array` (currently 400 'Batch processing failed'). `curl -i -s -X POST localhost:3000/products/batch -H 'content-type: application/json' -d '{"productIds":"1,2,3"}'` must return 400 naming the type error. A 600-element array must return 400 citing the max size.
+`curl -i -s -X POST localhost:3000/products/batch -H 'content-type: application/json' -d '{}'` must return 400 with `productIds must be an array` (currently 400 'Batch processing failed'). `curl -i -s -X POST localhost:3000/products/batch -H 'content-type: application/json' -d '{"productIds":"1,2,3"}'` must return 400 naming the type error. `'{"productIds":[]}'` must still return 200 with `processed: 0` — [04](04-scope.md) records `@ArrayNotEmpty` and `@ArrayMaxSize` as removed, so rejecting an empty or large batch here is a failure, not a pass.
 
 ---
 
@@ -884,7 +886,7 @@ Validate the reference before persisting: in `ProductsService.create()` add `if 
 
 | | |
 |---|---|
-| **Severity** | 🟡 Medium |
+| **Severity** | ⚪ Low |
 | **Theme** | Input validation & mass assignment |
 | **Location** | `src/orders/dto/create-order.dto.ts` |
 | **Confidence** | certain |
@@ -930,7 +932,7 @@ Add `@ArrayNotEmpty()` alongside `@IsArray()` on the `items` field, and change `
 
 | | |
 |---|---|
-| **Severity** | 🟡 Medium |
+| **Severity** | ⚪ Low |
 | **Theme** | Input validation & mass assignment |
 | **Location** | `src/products/dto/create-product.dto.ts` |
 | **Confidence** | likely |
@@ -972,7 +974,7 @@ src/products/product.entity.ts:16 `@Column({ type: 'decimal', precision: 10, sca
 
 | | |
 |---|---|
-| **Severity** | 🟡 Medium |
+| **Severity** | ⚪ Low |
 | **Theme** | Schema & type fidelity |
 | **Location** | `src/products/product.entity.ts` |
 | **Confidence** | certain |
