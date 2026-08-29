@@ -314,7 +314,7 @@ verified.
 
 ## What was removed for going beyond the report
 
-Five changes were written, then taken back out, because each one bounded or reshaped
+Six changes were written, then taken back out, because each one bounded or reshaped
 behaviour that no reported symptom covers. They are listed here rather than quietly
 dropped, so the reversal is as reviewable as the work.
 
@@ -323,6 +323,7 @@ dropped, so the reversal is as reviewable as the work.
 | The whole search-in-SQL commit | its own tenth commit | Measured at 6–20ms either way on the real dataset — see [above](#decided-search-scan) |
 | `take: 100` on search results | that same commit | Silently truncated results. A search matching 150 products returned 100 with no total and no next-page marker, which is itself "data is sometimes missing" |
 | `ArrayMaxSize(500)` on `/products/batch` | [C8](#c8-batch-reports-success-while-items-fail) | Rejected 501-id batches that work today. No reported symptom involves a large batch |
+| `ArrayNotEmpty()` on `/products/batch` | [C8](#c8-batch-reports-success-while-items-fail) | Turned `{"productIds": []}` from `success: true, processed: 0` into a 400. A well-formed request that worked before. The rest of the DTO stays, because `IsArray` and `IsInt({each})` are what turn a malformed body into a message naming the field — that is the reported symptom; rejecting an empty list is not |
 | Depth cap of 50 on the category tree | [C7](#c7-two-endpoints-500-on-every-valid-call) | Guards a cycle in `parent_id`, which cannot be produced through this API: `POST /categories` only ever points a new row at an existing one, and nothing reparents a category |
 | Merging duplicate `productId` lines | [C4](#c4-order-writes-lose-and-corrupt-data) | Changed the shape of an order to answer [Q7](03-open-questions.md#q7), a question these docs record as having no requirement behind it. Stock stays correct without it: each line is decremented conditionally, and a combined quantity over stock still rolls the transaction back |
 
