@@ -177,15 +177,24 @@ export class ProductsService {
     // level deep, so walking `children` recursively silently stopped at
     // grandchildren — the crash was hiding an incompleteness bug, and a guard
     // on the null parent would have fixed the 500 while leaving the tree wrong.
+    // The recursion carries the path it has walked and refuses to re-enter a
+    // node already on it. Without that, a cycle in parent_id makes UNION ALL
+    // loop forever: the request never returns and a Postgres backend spins
+    // until it is cancelled. A cycle IS reachable here — `createCategory` does
+    // not validate parentId, so one POST naming the id its own row is about to
+    // receive creates a self-loop, and Postgres accepts it because the foreign
+    // key is checked at statement end. This is a guard against a real input,
+    // not an arbitrary depth bound.
     const rows: CategoryRow[] = await this.categoriesRepository.query(
       `WITH RECURSIVE subtree AS (
-         SELECT id, name, parent_id
+         SELECT id, name, parent_id, ARRAY[id] AS path
          FROM categories
          WHERE id = $1
          UNION ALL
-         SELECT c.id, c.name, c.parent_id
+         SELECT c.id, c.name, c.parent_id, s.path || c.id
          FROM categories c
          JOIN subtree s ON c.parent_id = s.id
+         WHERE NOT c.id = ANY(s.path)
        )
        SELECT id, name, parent_id FROM subtree`,
       [categoryId],
