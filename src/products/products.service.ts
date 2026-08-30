@@ -22,6 +22,18 @@ const SEARCH_VERSION_KEY = 'product-search:version';
 // because the replacement token is new and orphans the old generation for good.
 const SEARCH_VERSION_TTL_MS = 24 * 60 * 60 * 1000;
 
+export interface CategoryRow {
+  id: number;
+  name: string;
+  parent_id: number | null;
+}
+
+export interface CategoryTreeNode {
+  id: number;
+  name: string;
+  children: CategoryTreeNode[];
+}
+
 @Injectable()
 export class ProductsService {
   constructor(
@@ -153,27 +165,76 @@ export class ProductsService {
     return this.categoriesRepository.save(category);
   }
 
-  async getCategoryTree(categoryId: number): Promise<any> {
-    const category = await this.findCategory(categoryId);
-    return this.buildCategoryTree(category);
+  async getCategoryTree(categoryId: number): Promise<CategoryTreeNode> {
+    const root = await this.categoriesRepository.findOne({
+      where: { id: categoryId },
+    });
+    if (!root) {
+      throw new NotFoundException(`Category #${categoryId} not found`);
+    }
+
+    // The whole subtree in one query. findCategory loads relations exactly one
+    // level deep, so walking `children` recursively silently stopped at
+    // grandchildren — the crash was hiding an incompleteness bug, and a guard
+    // on the null parent would have fixed the 500 while leaving the tree wrong.
+    // The recursion carries the path it has walked and refuses to re-enter a
+    // node already on it. Without that, a cycle in parent_id makes UNION ALL
+    // loop forever: the request never returns and a Postgres backend spins
+    // until it is cancelled. A cycle IS reachable here — `createCategory` does
+    // not validate parentId, so one POST naming the id its own row is about to
+    // receive creates a self-loop, and Postgres accepts it because the foreign
+    // key is checked at statement end. This is a guard against a real input,
+    // not an arbitrary depth bound.
+    const rows: CategoryRow[] = await this.categoriesRepository.query(
+      `WITH RECURSIVE subtree AS (
+         SELECT id, name, parent_id, ARRAY[id] AS path
+         FROM categories
+         WHERE id = $1
+         UNION ALL
+         SELECT c.id, c.name, c.parent_id, s.path || c.id
+         FROM categories c
+         JOIN subtree s ON c.parent_id = s.id
+         WHERE NOT c.id = ANY(s.path)
+       )
+       SELECT id, name, parent_id FROM subtree`,
+      [categoryId],
+    );
+
+    return this.buildCategoryTree(categoryId, rows);
   }
 
-  private buildCategoryTree(category: Category): any {
-    const tree: any = {
-      id: category.id,
-      name: category.name,
-      children: [],
-    };
-
-    if (category.parentId) {
-      tree.parent = this.buildCategoryTree(category.parent);
+  private buildCategoryTree(
+    rootId: number,
+    rows: CategoryRow[],
+  ): CategoryTreeNode {
+    // Visit each id once, and link each node to a parent only once, so a row
+    // the CTE emits more than once cannot appear twice in the response.
+    const nodes = new Map<number, CategoryTreeNode>();
+    for (const row of rows) {
+      if (!nodes.has(row.id)) {
+        nodes.set(row.id, { id: row.id, name: row.name, children: [] });
+      }
     }
 
-    if (category.children && category.children.length > 0) {
-      tree.children = category.children.map(child => this.buildCategoryTree(child));
+    const linked = new Set<number>([rootId]);
+    for (const row of rows) {
+      if (linked.has(row.id)) {
+        continue;
+      }
+      const parent =
+        row.parent_id === null ? undefined : nodes.get(row.parent_id);
+      const node = nodes.get(row.id);
+      if (parent && node) {
+        parent.children.push(node);
+        linked.add(row.id);
+      }
     }
 
-    return tree;
+    // `parent` is deliberately absent. buildCategoryTree used to recurse
+    // upwards as well as down, which cannot terminate once relations are loaded
+    // deeply enough for the tree to be complete: a parent's `children` contains
+    // the node you started from. A category tree is its descendants.
+    return nodes.get(rootId)!;
   }
 
   async processProductBatch(productIds: number[]): Promise<{ success: boolean; processed: number }> {
