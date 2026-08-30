@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -6,6 +7,20 @@ import { Cache } from 'cache-manager';
 import { Product } from './product.entity';
 import { Category } from './category.entity';
 import { CreateProductDto, CreateCategoryDto } from './dto/create-product.dto';
+
+// Search results are cached per query, so there is no single key to delete when a
+// product changes. Keyv exposes no wildcard delete, so eviction goes through a
+// generation token embedded in every search key: replacing it orphans the whole
+// generation at once, and the orphans age out on their own TTL.
+const SEARCH_TTL_MS = 60000;
+const SEARCH_VERSION_KEY = 'product-search:version';
+// The token is random and never reused, which is the invariant the whole scheme
+// rests on: no sequence of writes, races or expiries can re-enter a generation
+// that still holds live entries. A counter cannot promise that — it can be rolled
+// back by a stalled writer, or restart low and climb back onto live keys.
+// The TTL only bounds how long an idle key lingers; losing it early is safe,
+// because the replacement token is new and orphans the old generation for good.
+const SEARCH_VERSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class ProductsService {
@@ -35,34 +50,64 @@ export class ProductsService {
 
   async create(createProductDto: CreateProductDto): Promise<Product> {
     const product = this.productsRepository.create(createProductDto);
-    return this.productsRepository.save(product);
+    const saved = await this.productsRepository.save(product);
+    await this.invalidateSearchCache();
+    return saved;
   }
 
   async updateStock(id: number, quantity: number): Promise<Product> {
     const product = await this.findOne(id);
     product.stock = quantity;
-    return this.productsRepository.save(product);
+    const saved = await this.productsRepository.save(product);
+    await this.invalidateSearchCache();
+    return saved;
   }
 
   async remove(id: number): Promise<void> {
     const product = await this.findOne(id);
     await this.productsRepository.remove(product);
+    await this.invalidateSearchCache();
+  }
+
+  private async getSearchVersion(): Promise<string> {
+    const version = await this.cacheManager.get<string>(SEARCH_VERSION_KEY);
+    if (typeof version === 'string') {
+      return version;
+    }
+    const fresh = randomUUID();
+    await this.cacheManager.set(SEARCH_VERSION_KEY, fresh, SEARCH_VERSION_TTL_MS);
+    return fresh;
+  }
+
+  // Unconditional write: no read half, so there is nothing to race and no way to
+  // put back a token that was already in use.
+  private async invalidateSearchCache(): Promise<void> {
+    await this.cacheManager.set(
+      SEARCH_VERSION_KEY,
+      randomUUID(),
+      SEARCH_VERSION_TTL_MS,
+    );
   }
 
   async searchProducts(query: string): Promise<Product[]> {
-    const cacheKey = 'product-search';
+    // Matching is case-insensitive, so the key is normalised the same way —
+    // 'Laptop' and 'laptop' are one entry, not two.
+    const normalized = query.trim().toLowerCase();
+    const version = await this.getSearchVersion();
+    const cacheKey = `product-search:v${version}:${normalized}`;
+
     const cached = await this.cacheManager.get<Product[]>(cacheKey);
     if (cached) {
       return cached;
     }
 
     const products = await this.productsRepository.find();
-    const results = products.filter(p => 
-      p.name.toLowerCase().includes(query.toLowerCase()) ||
-      (p.description || '').toLowerCase().includes(query.toLowerCase())
+    const results = products.filter(p =>
+      p.name.toLowerCase().includes(normalized) ||
+      (p.description || '').toLowerCase().includes(normalized)
     );
 
-    await this.cacheManager.set(cacheKey, results, 60000);
+    await this.cacheManager.set(cacheKey, results, SEARCH_TTL_MS);
     return results;
   }
 
@@ -118,6 +163,7 @@ export class ProductsService {
           const product = await this.findOne(id);
           product.updatedAt = new Date();
           await this.productsRepository.save(product);
+          await this.invalidateSearchCache();
           processed++;
         } catch (error) {
           console.log('Error processing product');
