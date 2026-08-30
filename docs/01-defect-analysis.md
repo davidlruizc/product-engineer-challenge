@@ -61,7 +61,7 @@ app.module.ts:32-39 returns `{ store: await redisStore({...}) }`. Installed @nes
 
 ### How it fails
 
-Warm any cache entry, then `redis-cli -n 1 KEYS '*'` returns nothing while GET /users still reports hits. `pnpm start:dev` (nest start --watch) restarts on every file save and wipes the entire cache. With more than one instance, `cacheManager.del('users:all')` (users.service.ts:49,169) cannot reach a peer, so a deleted user keeps being served — this is the multi-instance half of 'data is sometimes inconsistent or missing'. Because serialization is disabled, `findAll` hands the caller the same `User[]` instance that is in the cache, so any caller mutating a returned entity silently rewrites the cached value with no `set()`.
+Warm any cache entry, then `redis-cli -n 1 KEYS '*'` returns nothing while GET /users still reports hits. `pnpm start:dev` (nest start --watch) restarts on every file save and wipes the entire cache. With more than one instance, `cacheManager.del('users:all')` (users.service.ts:49,56) cannot reach a peer, so a deleted user keeps being served — this is the multi-instance half of 'data is sometimes inconsistent or missing'. Because serialization is disabled, `findAll` hands the caller the same `User[]` instance that is in the cache, so any caller mutating a returned entity silently rewrites the cached value with no `set()`.
 
 ### Evidence
 
@@ -212,7 +212,7 @@ src/products/products.service.ts:52-66 verbatim:
 55    if (cached) { return cached; }
 ...
 65    await this.cacheManager.set(cacheKey, results, 60000);
-Contrast users.service.ts:19 `'users:all'` and :144 `` `user:${id}` `` which correctly key by input.
+Contrast users.service.ts:19 `'users:all'` and :31 `` `user:${id}` `` which correctly key by input.
 
 ### Proposed fix
 
@@ -645,7 +645,7 @@ src/orders/orders.service.ts:39-43 verbatim:
 41      relations: ['user', 'items', 'items.product']
 42    });
 43  }
-:57-59 same shape with `where: { userId }`. src/products/products.service.ts:22 `return this.productsRepository.find({ relations: ['category'] });`. Eager flags at order.entity.ts:24,71; order-item.entity.ts:17; product.entity.ts:28.
+:57-59 same shape with `where: { userId }`. src/products/products.service.ts:22 `return this.productsRepository.find({ relations: ['category'] });`. Eager flags at order.entity.ts:24,31; order-item.entity.ts:17; product.entity.ts:28.
 
 ### Proposed fix
 
@@ -671,7 +671,7 @@ Add mandatory pagination driven by validated query params with a sane default an
 
 ### Why it's broken
 
-`searchProducts` writes a 60s cache entry at line 65, but none of the write paths touch the cache: `create` (36-39), `updateStock` (41-45), `remove` (47-50) and `processProductBatch` (112-131) all persist changes and return without any `cacheManager.del`. Grepping `cacheManager` across src/products/products.service.ts returns only lines 18, 54 and 65 — no `del` anywhere in the file — while the users module DOES invalidate on every write (users.service.ts:49, 169, 170). That asymmetry is the tell that the invalidation was deliberately omitted here. `updateStock` is also reached from the order flow (orders.service.ts:89 and :135), so ordinary order traffic desynchronises the search cache.
+`searchProducts` writes a 60s cache entry at line 65, but none of the write paths touch the cache: `create` (36-39), `updateStock` (41-45), `remove` (47-50) and `processProductBatch` (112-131) all persist changes and return without any `cacheManager.del`. Grepping `cacheManager` across src/products/products.service.ts returns only lines 18, 54 and 65 — no `del` anywhere in the file — while the users module DOES invalidate on every write (users.service.ts:49, 56, 57). That asymmetry is the tell that the invalidation was deliberately omitted here. `updateStock` is also reached from the order flow (orders.service.ts:89 and :135), so ordinary order traffic desynchronises the search cache.
 
 ### How it fails
 
@@ -679,11 +679,11 @@ Add mandatory pagination driven by validated query params with a sane default an
 
 ### Evidence
 
-src/products/products.service.ts:36-39, :41-45, :47-50, :112-131 — none reference `cacheManager`; :65 `await this.cacheManager.set(cacheKey, results, 60000);`. `grep -n cacheManager src/products/products.service.ts` → 18, 54, 65 only. Contrast src/users/users.service.ts:49 `await this.cacheManager.del('users:all');` and :169-170.
+src/products/products.service.ts:36-39, :41-45, :47-50, :112-131 — none reference `cacheManager`; :65 `await this.cacheManager.set(cacheKey, results, 60000);`. `grep -n cacheManager src/products/products.service.ts` → 18, 54, 65 only. Contrast src/users/users.service.ts:56 `await this.cacheManager.del('users:all');` and :57.
 
 ### Proposed fix
 
-Evict from the mutating paths after the save/remove. Since Keyv/cache-manager has no wildcard delete, combine this with the per-query keys from the cache-key fix using a versioned prefix — `product-search:v{n}:{query}` — and bump `n` at the end of `create`, `updateStock`, `remove` and `processProductBatch`; or track the emitted key set explicitly. Mirror the pattern already used at users.service.ts:49-170.
+Evict from the mutating paths after the save/remove. Since Keyv/cache-manager has no wildcard delete, combine this with the per-query keys from the cache-key fix using a versioned prefix — `product-search:v{n}:{query}` — and bump `n` at the end of `create`, `updateStock`, `remove` and `processProductBatch`; or track the emitted key set explicitly. Mirror the pattern already used at users.service.ts:49,56-57.
 
 ### How we'll know it's fixed
 
@@ -755,10 +755,10 @@ src/app.module.ts:36 → `db: parseInt(process.env.REDIS_DB || '0', 10),`. If ap
 ### Evidence
 
 src/products/products.controller.ts:29-32 verbatim:
-79  @Post('batch')
-80  processBatch(@Body() body: { productIds: number[] }) {
-81    return this.productsService.processProductBatch(body.productIds);
-82  }
+29  @Post('batch')
+30  processBatch(@Body() body: { productIds: number[] }) {
+31    return this.productsService.processProductBatch(body.productIds);
+32  }
 src/products/products.service.ts:116 `for (const id of productIds) {` inside the try opened at :115; :126-128 the rewriting catch.
 
 ### Proposed fix
@@ -903,7 +903,7 @@ Validate the reference before persisting: in `ProductsService.create()` add `if 
 
 ### Evidence
 
-src/orders/dto/create-order.dto.ts:4-192 verbatim:
+src/orders/dto/create-order.dto.ts:4-20 verbatim:
 176  export class OrderItemDto {
 177    @IsNumber()
 178    productId: number;
@@ -950,13 +950,13 @@ Add `@ArrayNotEmpty()` alongside `@IsArray()` on the `items` field, and change `
 ### Evidence
 
 src/products/dto/create-product.dto.ts:11-18 verbatim:
-204    @IsNumber()
-205    @Min(0)
-206    price: number;
-208    @IsNumber()
-209    @Min(0)
-210    @IsOptional()
-211    stock?: number;
+11    @IsNumber()
+12    @Min(0)
+13    price: number;
+15    @IsNumber()
+16    @Min(0)
+17    @IsOptional()
+18    stock?: number;
 src/products/product.entity.ts:16 `@Column({ type: 'decimal', precision: 10, scale: 2 })`; :19 `@Column({ default: 0 }) stock: number;` → integer.
 
 ### Proposed fix

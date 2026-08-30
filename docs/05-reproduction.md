@@ -368,11 +368,11 @@ docker exec challenge-db psql -U postgres -d challengedb -tAc \
 
 **Observed:**
 ```
-search before create: [ 'Mouse', 'Mousepad' ]
+search before create: [ 'Mouse' ]
 created:              Mouse Mat XL
-search after create:  [ 'Mouse', 'Mousepad' ]     <-- stale
+search after create:  [ 'Mouse' ]                 <-- stale
 
-DB truth:  Mouse / Mousepad / Mouse Mat XL
+DB truth:  Mouse / Mouse Mat XL
 ```
 
 No product write path evicts the cache.
