@@ -1,4 +1,12 @@
-import { IsString, IsNumber, IsOptional, Min, IsBoolean } from 'class-validator';
+import {
+  IsString,
+  IsNumber,
+  IsOptional,
+  Min,
+  Max,
+  IsInt,
+} from 'class-validator';
+import { INT4_MAX, INT4_MIN } from '../../common/database-errors';
 
 export class CreateProductDto {
   @IsString()
@@ -17,7 +25,9 @@ export class CreateProductDto {
   @IsOptional()
   stock?: number;
 
-  @IsNumber()
+  @IsInt()
+  @Min(INT4_MIN)
+  @Max(INT4_MAX)
   @IsOptional()
   categoryId?: number;
 }
@@ -30,7 +40,9 @@ export class CreateCategoryDto {
   @IsOptional()
   description?: string;
 
-  @IsNumber()
+  @IsInt()
+  @Min(INT4_MIN)
+  @Max(INT4_MAX)
   @IsOptional()
   parentId?: number;
 }

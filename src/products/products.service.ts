@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
   HttpException,
+  ConflictException,
   Inject,
   Logger,
 } from '@nestjs/common';
@@ -13,6 +14,10 @@ import { Cache } from 'cache-manager';
 import { Product } from './product.entity';
 import { Category } from './category.entity';
 import { CreateProductDto, CreateCategoryDto } from './dto/create-product.dto';
+import {
+  sqlState,
+  FOREIGN_KEY_VIOLATION,
+} from '../common/database-errors';
 
 // Search results are cached per query, so there is no single key to delete when a
 // product changes. Keyv exposes no wildcard delete, so eviction goes through a
@@ -81,7 +86,22 @@ export class ProductsService {
 
   async create(createProductDto: CreateProductDto): Promise<Product> {
     const product = this.productsRepository.create(createProductDto);
-    const saved = await this.productsRepository.save(product);
+
+    let saved: Product;
+    try {
+      saved = await this.productsRepository.save(product);
+    } catch (error) {
+      // A categoryId that does not exist is the caller naming a missing
+      // resource, so it is a 404 about the category rather than a 500 about a
+      // constraint the caller has never heard of.
+      if (sqlState(error) === FOREIGN_KEY_VIOLATION) {
+        throw new NotFoundException(
+          `Category #${createProductDto.categoryId} not found`,
+        );
+      }
+      throw error;
+    }
+
     await this.invalidateSearchCache();
     return saved;
   }
@@ -116,7 +136,18 @@ export class ProductsService {
 
   async remove(id: number): Promise<void> {
     const product = await this.findOne(id);
-    await this.productsRepository.remove(product);
+
+    try {
+      await this.productsRepository.remove(product);
+    } catch (error) {
+      if (sqlState(error) === FOREIGN_KEY_VIOLATION) {
+        throw new ConflictException(
+          `Product #${id} cannot be deleted while it is referenced by existing orders`,
+        );
+      }
+      throw error;
+    }
+
     await this.invalidateSearchCache();
   }
 
@@ -181,7 +212,15 @@ export class ProductsService {
 
   async createCategory(dto: CreateCategoryDto): Promise<Category> {
     const category = this.categoriesRepository.create(dto);
-    return this.categoriesRepository.save(category);
+
+    try {
+      return await this.categoriesRepository.save(category);
+    } catch (error) {
+      if (sqlState(error) === FOREIGN_KEY_VIOLATION) {
+        throw new NotFoundException(`Category #${dto.parentId} not found`);
+      }
+      throw error;
+    }
   }
 
   async getCategoryTree(categoryId: number): Promise<CategoryTreeNode> {
