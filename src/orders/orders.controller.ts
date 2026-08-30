@@ -9,7 +9,7 @@ import {
   Query,
   BadRequestException,
 } from '@nestjs/common';
-import { INT4_MAX } from '../common/database-errors';
+import { INT4_MAX, INT4_MIN } from '../common/database-errors';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
@@ -45,7 +45,7 @@ export class OrdersController {
     // userId is an int4 column. Without this the driver raises SQLSTATE 22003
     // and it escapes as a bare 500 — the same shape as the defect above.
     const userId = Number(rawUserId);
-    if (!Number.isSafeInteger(userId) || Math.abs(userId) > INT4_MAX) {
+    if (!Number.isSafeInteger(userId) || userId < INT4_MIN || userId > INT4_MAX) {
       throw new BadRequestException('userId is out of range');
     }
 
