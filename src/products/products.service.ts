@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -9,13 +10,16 @@ import { CreateProductDto, CreateCategoryDto } from './dto/create-product.dto';
 
 // Search results are cached per query, so there is no single key to delete when a
 // product changes. Keyv exposes no wildcard delete, so eviction goes through a
-// version number embedded in every search key: bumping it orphans the whole
+// generation token embedded in every search key: replacing it orphans the whole
 // generation at once, and the orphans age out on their own TTL.
 const SEARCH_TTL_MS = 60000;
 const SEARCH_VERSION_KEY = 'product-search:version';
-// Deliberately far longer than SEARCH_TTL_MS. If the version key ever does expire,
-// reads fall back to version 1 — which is only safe because every entry written
-// under a later version has already expired by then.
+// The token is random and never reused, which is the invariant the whole scheme
+// rests on: no sequence of writes, races or expiries can re-enter a generation
+// that still holds live entries. A counter cannot promise that — it can be rolled
+// back by a stalled writer, or restart low and climb back onto live keys.
+// The TTL only bounds how long an idle key lingers; losing it early is safe,
+// because the replacement token is new and orphans the old generation for good.
 const SEARCH_VERSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 @Injectable()
@@ -65,20 +69,22 @@ export class ProductsService {
     await this.invalidateSearchCache();
   }
 
-  private async getSearchVersion(): Promise<number> {
-    const version = await this.cacheManager.get<number>(SEARCH_VERSION_KEY);
-    if (typeof version === 'number') {
+  private async getSearchVersion(): Promise<string> {
+    const version = await this.cacheManager.get<string>(SEARCH_VERSION_KEY);
+    if (typeof version === 'string') {
       return version;
     }
-    await this.cacheManager.set(SEARCH_VERSION_KEY, 1, SEARCH_VERSION_TTL_MS);
-    return 1;
+    const fresh = randomUUID();
+    await this.cacheManager.set(SEARCH_VERSION_KEY, fresh, SEARCH_VERSION_TTL_MS);
+    return fresh;
   }
 
+  // Unconditional write: no read half, so there is nothing to race and no way to
+  // put back a token that was already in use.
   private async invalidateSearchCache(): Promise<void> {
-    const current = await this.getSearchVersion();
     await this.cacheManager.set(
       SEARCH_VERSION_KEY,
-      current + 1,
+      randomUUID(),
       SEARCH_VERSION_TTL_MS,
     );
   }
