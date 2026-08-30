@@ -209,9 +209,12 @@ src/products/products.service.ts:52-66 verbatim:
 52  async searchProducts(query: string): Promise<Product[]> {
 53    const cacheKey = 'product-search';
 54    const cached = await this.cacheManager.get<Product[]>(cacheKey);
-55    if (cached) { return cached; }
+55    if (cached) {
+56      return cached;
+57    }
 ...
 65    await this.cacheManager.set(cacheKey, results, 60000);
+66    return results;
 Contrast users.service.ts:19 `'users:all'` and :31 `` `user:${id}` `` which correctly key by input.
 
 ### Proposed fix
@@ -571,6 +574,7 @@ src/orders/orders.controller.ts:38-44 verbatim:
 41    @Body('status') status: OrderStatus,
 42  ) {
 43    return this.ordersService.updateStatus(id, status);
+44  }
 src/orders/order.entity.ts:18 `@Column({ type: 'enum', enum: OrderStatus, default: OrderStatus.PENDING })`.
 
 ### Proposed fix
