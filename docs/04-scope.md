@@ -324,13 +324,54 @@ dropped, so the reversal is as reviewable as the work.
 | `take: 100` on search results | that same commit | Silently truncated results. A search matching 150 products returned 100 with no total and no next-page marker, which is itself "data is sometimes missing" |
 | `ArrayMaxSize(500)` on `/products/batch` | [C8](#c8-batch-reports-success-while-items-fail) | Rejected 501-id batches that work today. No reported symptom involves a large batch |
 | `ArrayNotEmpty()` on `/products/batch` | [C8](#c8-batch-reports-success-while-items-fail) | Turned `{"productIds": []}` from `success: true, processed: 0` into a 400. A well-formed request that worked before. The rest of the DTO stays, because `IsArray` and `IsInt({each})` are what turn a malformed body into a message naming the field — that is the reported symptom; rejecting an empty list is not |
-| Depth cap of 50 on the category tree | [C7](#c7-two-endpoints-500-on-every-valid-call) | Guards a cycle in `parent_id`, which cannot be produced through this API: `POST /categories` only ever points a new row at an existing one, and nothing reparents a category |
+| Depth cap of 50 on the category tree | [C7](#c7-two-endpoints-500-on-every-valid-call) | Removed, and the removal was right, but **the reason given for it was wrong** — see [below](#corrected-the-cycle-premise). A cycle is reachable. C7 ships a cycle-safe recursion instead of a depth cap: still no arbitrary bound, but no reliance on the false premise either |
 | Merging duplicate `productId` lines | [C4](#c4-order-writes-lose-and-corrupt-data) | Changed the shape of an order to answer [Q7](03-open-questions.md#q7), a question these docs record as having no requirement behind it. Stock stays correct without it: each line is decremented conditionally, and a combined quantity over stock still rolls the transaction back |
 
 The dependency tidy-up in [C2](#c2-cache-never-reaches-redis) went the other way —
 `ioredis` was left installed by an earlier draft on the grounds that removing it was
 "tidying rather than a root-cause fix." It is now removed, because the commit that
 orphaned it is the commit that should account for it.
+
+<a id="corrected-the-cycle-premise"></a>
+
+### Corrected: a cycle in the category tree IS reachable
+
+An earlier version of this document justified dropping C7's depth cap by asserting that a
+cycle "cannot be produced through this API: `POST /categories` only ever points a new row
+at an existing one, and nothing reparents a category."
+
+The second clause is true — the global `whitelist: true` from [C1](#c1-mass-assignment-destroys-rows)
+strips `id`, so an existing category cannot be reparented. The first clause is false, and
+one request falsifies it:
+
+```console
+$ curl -s localhost:3000/categories                      # -> ids [2, 1, 3]
+$ curl -X POST localhost:3000/categories -H 'content-type: application/json'     -d '{"name":"SelfLoop","parentId":4}'
+{"id":4,"name":"SelfLoop","parentId":4}                  # HTTP 201
+```
+
+`createCategory` does not validate `parentId`, ids are sequential and readable, and Postgres
+checks the foreign key at statement end — so a row may name itself as its own parent. With
+`UNION ALL` and no guard, the subtree query then never returns:
+
+```console
+$ curl -m 15 localhost:3000/categories/4/tree
+HTTP 000 after 15.013259s
+# pg_stat_activity: WITH RECURSIVE subtree ... active 00:00:15.257571 (ended by pg_cancel_backend)
+```
+
+That is worse than the defect C7 fixes: on `main` the same row fails instantly with a
+TypeError, so an unguarded CTE converts a fast 500 into an unbounded hang on the endpoint
+whose whole purpose is to stop 500ing.
+
+[C9](#c9-raw-driver-errors-reach-the-client) does not close it either — that commit maps
+*dangling* foreign keys, and a self-loop is a valid one.
+
+**The decision stands, the reasoning does not.** There is still no arbitrary depth cap;
+C7's recursion instead carries the path it has walked and refuses to re-enter a node
+already on it, which is bounded by the graph rather than by a magic number. Recorded here
+because a scope decision resting on a false premise is worth more as a correction than as
+a quietly amended table.
 
 ## Status
 
