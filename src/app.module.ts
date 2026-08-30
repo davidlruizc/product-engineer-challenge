@@ -40,7 +40,14 @@ import { Category } from './products/category.entity';
         return {
           stores: [
             new Keyv({
-              store: new KeyvRedis(`redis://${host}:${port}/${db}`),
+              // `connectionTimeout` bounds the connect. Without it the client
+              // installs node-redis's infinite reconnect strategy and keeps the
+              // offline queue, so a Redis that is down leaves every cached read
+              // awaiting a connect that never settles — the request hangs rather
+              // than failing.
+              store: new KeyvRedis(`redis://${host}:${port}/${db}`, {
+                connectionTimeout: 1000,
+              }),
             }),
           ],
           ttl: 60000,
