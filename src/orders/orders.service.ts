@@ -166,8 +166,14 @@ export class OrdersService {
       OrderStatus.CONFIRMED,
     );
     if (!claimed) {
+      // Re-read rather than reusing the snapshot above. Losing the claim means
+      // the status changed after that read, so the snapshot names the status the
+      // order had when the request arrived — on a double submit that is
+      // `pending`, which reads as a contradiction because pending is exactly
+      // what is payable. The refusal has to name what actually refused it.
+      const current = await this.findOne(orderId);
       throw new BadRequestException(
-        `Order #${orderId} cannot be paid while it is ${order.status}`,
+        `Order #${orderId} cannot be paid while it is ${current.status}`,
       );
     }
 
