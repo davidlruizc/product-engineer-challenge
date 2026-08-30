@@ -112,7 +112,7 @@ Recorded as a deliberate narrowing, in the same spirit as [Q11](#q11): take the 
 **The fix, in order:**
 1. Delete the `parent` branch at products.service.ts:101-103.
 2. If a breadcrumb is genuinely required later, return it as a **flat** `path: [{id,name},...]` built by walking ancestors iteratively. Flat cannot cycle.
-3. Load the subtree properly — TreeRepository or a recursive CTE, with a visited-set. This addresses the incompleteness the crash was hiding. No depth bound, since no endpoint can produce a cycle in `parent_id`.
+3. Load the subtree properly — TreeRepository or a recursive CTE, with a visited-set. This addresses the incompleteness the crash was hiding. No arbitrary depth bound, but the recursion carries the path it has walked: a cycle in `parent_id` is reachable through `POST /categories`, which does not validate `parentId`. See [04](04-scope.md#corrected-the-cycle-premise) — an earlier draft of this answer asserted the opposite.
 4. Drop the unused `products` relation in the same pass ([D27](01-defect-analysis.md#d27), free).
 
 **Verification trap:** with the seeded `Electronics → Laptops → Gaming` chain, a tree on Electronics must show **Gaming nested under Laptops**. The one-line `if (category.parent)` guard stops the crash but returns Gaming missing — which looks like a pass. Assert on depth, not on absence of a 500.

@@ -293,7 +293,7 @@ src/products/products.service.ts:76 `relations: ['parent', 'children', 'products
 
 ### Proposed fix
 
-Minimal correct fix: guard on the loaded relation rather than the FK column — line 101 becomes `if (category.parent) {`. Proper fix: stop walking both directions from one partially-loaded entity. Give the tree path its own query that loads the subtree it needs (a TypeORM TreeRepository / `@Tree('closure-table')` on Category, or one recursive CTE) and recurse downward over `children` only, carrying a `visited: Set<number>` so a row emitted twice cannot be linked twice. A depth bound is deliberately not added: no endpoint can create a cycle in `parent_id`, so it would guard a state the API cannot reach. If the ancestor chain is genuinely wanted, walk it iteratively (`while (node.parentId)` with an explicit findOne per hop).
+Minimal correct fix: guard on the loaded relation rather than the FK column — line 101 becomes `if (category.parent) {`. Proper fix: stop walking both directions from one partially-loaded entity. Give the tree path its own query that loads the subtree it needs (a TypeORM TreeRepository / `@Tree('closure-table')` on Category, or one recursive CTE) and recurse downward over `children` only, carrying a `visited: Set<number>` so a row emitted twice cannot be linked twice. No arbitrary depth bound is added, but the recursion must be cycle-safe: a cycle in `parent_id` IS reachable, because `createCategory` does not validate `parentId` and a row can name the id it is about to receive. See [04](04-scope.md#corrected-the-cycle-premise) — an earlier draft asserted the opposite. If the ancestor chain is genuinely wanted, walk it iteratively (`while (node.parentId)` with an explicit findOne per hop).
 
 ### How we'll know it's fixed
 
