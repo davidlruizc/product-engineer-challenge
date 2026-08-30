@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   Injectable,
   NotFoundException,
+  HttpException,
   Inject,
   Logger,
 } from '@nestjs/common';
@@ -274,8 +275,19 @@ export class ProductsService {
       } catch (error) {
         // Was `console.log('Error processing product')` — no id, no cause, and
         // then reported as success anyway.
-        const reason = error instanceof Error ? error.message : String(error);
-        this.logger.warn(`Batch item ${id} failed: ${reason}`);
+        const detail = error instanceof Error ? error.message : String(error);
+
+        // Only an HttpException carries a message written to be read by a
+        // client. Anything else is a driver or runtime error, and this is the
+        // one endpoint that hands `error.message` back rather than letting
+        // Nest's filter mask it — an id past int4 range, for instance, would
+        // otherwise return `value "2147483648" is out of range for type
+        // integer`, leaking the column type in a field meant to explain a
+        // business failure. The detail still goes to the log.
+        const reason =
+          error instanceof HttpException ? error.message : 'Processing failed';
+
+        this.logger.warn(`Batch item ${id} failed: ${detail}`);
         failed.push({ id, reason });
       }
     }
