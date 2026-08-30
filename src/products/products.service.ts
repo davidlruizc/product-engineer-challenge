@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  HttpException,
+  Inject,
+  Logger,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
@@ -28,6 +34,17 @@ export interface CategoryRow {
   parent_id: number | null;
 }
 
+export interface BatchFailure {
+  id: number;
+  reason: string;
+}
+
+export interface BatchResult {
+  success: boolean;
+  processed: number;
+  failed: BatchFailure[];
+}
+
 export interface CategoryTreeNode {
   id: number;
   name: string;
@@ -36,6 +53,8 @@ export interface CategoryTreeNode {
 
 @Injectable()
 export class ProductsService {
+  private readonly logger = new Logger(ProductsService.name);
+
   constructor(
     @InjectRepository(Product)
     private productsRepository: Repository<Product>,
@@ -237,25 +256,42 @@ export class ProductsService {
     return nodes.get(rootId)!;
   }
 
-  async processProductBatch(productIds: number[]): Promise<{ success: boolean; processed: number }> {
+  async processProductBatch(productIds: number[]): Promise<BatchResult> {
     let processed = 0;
-    
-    try {
-      for (const id of productIds) {
-        try {
-          const product = await this.findOne(id);
-          product.updatedAt = new Date();
-          await this.productsRepository.save(product);
-          await this.invalidateSearchCache();
-          processed++;
-        } catch (error) {
-          console.log('Error processing product');
-        }
+    const failed: BatchFailure[] = [];
+
+    // The outer try/catch that used to wrap this loop is gone. Its only real
+    // effect was rewriting any cause into 'Batch processing failed', including
+    // the TypeError raised when productIds was not an array. Removing it is
+    // only safe because ProcessBatchDto now rejects that body at the boundary
+    // with a message naming the field.
+    for (const id of productIds) {
+      try {
+        const product = await this.findOne(id);
+        product.updatedAt = new Date();
+        await this.productsRepository.save(product);
+        await this.invalidateSearchCache();
+        processed++;
+      } catch (error) {
+        // Was `console.log('Error processing product')` — no id, no cause, and
+        // then reported as success anyway.
+        const detail = error instanceof Error ? error.message : String(error);
+
+        // Only an HttpException carries a message written to be read by a
+        // client. Anything else is a driver or runtime error, and this is the
+        // one endpoint that hands `error.message` back rather than letting
+        // Nest's filter mask it — an id past int4 range, for instance, would
+        // otherwise return `value "2147483648" is out of range for type
+        // integer`, leaking the column type in a field meant to explain a
+        // business failure. The detail still goes to the log.
+        const reason =
+          error instanceof HttpException ? error.message : 'Processing failed';
+
+        this.logger.warn(`Batch item ${id} failed: ${detail}`);
+        failed.push({ id, reason });
       }
-    } catch (error) {
-      throw new BadRequestException('Batch processing failed');
     }
 
-    return { success: true, processed };
+    return { success: failed.length === 0, processed, failed };
   }
 }
