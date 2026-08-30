@@ -3,6 +3,15 @@ import { QueryFailedError } from 'typeorm';
 /** Postgres SQLSTATE codes the API is expected to translate rather than leak. */
 export const FOREIGN_KEY_VIOLATION = '23503';
 export const UNIQUE_VIOLATION = '23505';
+/** Raised when a value exceeds the range of its column type, e.g. int4. */
+export const NUMERIC_VALUE_OUT_OF_RANGE = '22003';
+
+/**
+ * The largest value an `integer` column accepts. Ids are int4 here, so anything
+ * past this reaches the driver and comes back as an unmapped 500 unless it is
+ * rejected at the boundary first.
+ */
+export const INT4_MAX = 2147483647;
 
 interface PostgresDriverError {
   code?: string;

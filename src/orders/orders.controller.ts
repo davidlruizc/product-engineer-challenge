@@ -1,4 +1,15 @@
-import { Controller, Get, Post, Patch, Body, Param, ParseIntPipe, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Body,
+  Param,
+  ParseIntPipe,
+  Query,
+  BadRequestException,
+} from '@nestjs/common';
+import { INT4_MAX } from '../common/database-errors';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
@@ -9,14 +20,36 @@ export class OrdersController {
 
   @Get()
   findAll(
-    // parseInt('abc') is NaN, which used to reach the WHERE clause and come
-    // back as a driver error rendered as a 500. The pipe rejects it up front.
-    @Query('userId', new ParseIntPipe({ optional: true })) userId?: number,
+    // Taken as a string on purpose. Declaring it `number` makes the global
+    // ValidationPipe's transform run first and coerce with `+value`, so
+    // ParseIntPipe never sees what the client sent: '' and ' ' arrive as 0,
+    // and '1e3' and '0x10' arrive as 1000 and 16, all of which then pass a
+    // digits-only check that runs too late to matter.
+    @Query('userId') rawUserId?: string,
   ) {
-    if (userId !== undefined) {
-      return this.ordersService.findByUser(userId);
+    // An absent or blank filter means "no filter", which is what the endpoint
+    // did before this commit. Folding it to user 0 returns an empty list for a
+    // request that should return everything — a wrong answer with a 200 on it.
+    if (rawUserId === undefined || rawUserId.trim() === '') {
+      return this.ordersService.findAll();
     }
-    return this.ordersService.findAll();
+
+    // parseInt('abc') is NaN, which used to reach the WHERE clause and come
+    // back as a driver error rendered as a 500.
+    if (!/^-?\d+$/.test(rawUserId)) {
+      throw new BadRequestException(
+        'Validation failed (numeric string is expected)',
+      );
+    }
+
+    // userId is an int4 column. Without this the driver raises SQLSTATE 22003
+    // and it escapes as a bare 500 — the same shape as the defect above.
+    const userId = Number(rawUserId);
+    if (!Number.isSafeInteger(userId) || Math.abs(userId) > INT4_MAX) {
+      throw new BadRequestException('userId is out of range');
+    }
+
+    return this.ordersService.findByUser(userId);
   }
 
   @Get(':id')
