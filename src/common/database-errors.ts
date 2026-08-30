@@ -11,7 +11,9 @@ export const UNIQUE_VIOLATION = '23505';
  * out-of-range id — but those are pre-existing and outside this commit's
  * defects, and the two places that could translate it are both ruled out:
  * a global exception filter is rejected in `docs/README.md`, and the per-call
- * catches here do not wrap the routes that leak. Closing that class properly
+ * catches here do not wrap the calls that leak — `DELETE /products/:id` and
+ * `DELETE /users/:id` do have a catch, but the id reaches the driver in the
+ * pre-flight `findOne` that sits outside it. Closing that class properly
  * means bounding every `:id` at its pipe, which is its own change. Written down
  * so the limit is a decision rather than an oversight.
  */
