@@ -767,7 +767,7 @@ Declare `class ProcessBatchDto { @IsArray() @IsInt({ each: true }) productIds: n
 
 ### How we'll know it's fixed
 
-`curl -i -s -X POST localhost:3000/products/batch -H 'content-type: application/json' -d '{}'` must return 400 with `productIds must be an array` (currently 400 'Batch processing failed'). `curl -i -s -X POST localhost:3000/products/batch -H 'content-type: application/json' -d '{"productIds":"1,2,3"}'` must return 400 naming the type error. `'{"productIds":[]}'` must still return 200 with `processed: 0` — [04](04-scope.md) records `@ArrayNotEmpty` and `@ArrayMaxSize` as removed, so rejecting an empty or large batch here is a failure, not a pass.
+`curl -i -s -X POST localhost:3000/products/batch -H 'content-type: application/json' -d '{}'` must return 400 with `productIds must be an array` (currently 400 'Batch processing failed'). `curl -i -s -X POST localhost:3000/products/batch -H 'content-type: application/json' -d '{"productIds":"1,2,3"}'` must return 400 naming the type error. `'{"productIds":[]}'` must still return 201 with `processed: 0` — [04](04-scope.md) records `@ArrayNotEmpty` and `@ArrayMaxSize` as removed, so rejecting an empty or large batch here is a failure, not a pass.
 
 ---
 
@@ -904,17 +904,17 @@ Validate the reference before persisting: in `ProductsService.create()` add `if 
 ### Evidence
 
 src/orders/dto/create-order.dto.ts:4-20 verbatim:
-176  export class OrderItemDto {
-177    @IsNumber()
-178    productId: number;
-180    @IsNumber()
-181    @Min(1)
-182    quantity: number;
+4   export class OrderItemDto {
+5     @IsNumber()
+6     productId: number;
+8     @IsNumber()
+9     @Min(1)
+10    quantity: number;
 ...
-189    @IsArray()
-190    @ValidateNested({ each: true })
-191    @Type(() => OrderItemDto)
-192    items: OrderItemDto[];
+17    @IsArray()
+18    @ValidateNested({ each: true })
+19    @Type(() => OrderItemDto)
+20    items: OrderItemDto[];
 src/orders/order-item.entity.ts:24-25 `@Column() quantity: number;` (integer). src/orders/orders.service.ts:73 the loop.
 
 ### Proposed fix
