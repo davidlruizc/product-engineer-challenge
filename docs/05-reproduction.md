@@ -182,19 +182,59 @@ when a given run doesn't catch it.
 
 ---
 
-### D4 / D9 — not independently observable
+### D4 — Un-awaited stock writes race each other inside one request
 
-Recorded so you don't waste time hunting them:
+An earlier draft of this runbook called D4 "not independently observable." **That was
+wrong**, and the correction matters: D4 reproduces on its own, without concurrency,
+more reliably than D8 does.
 
-- **[D4](01-defect-analysis.md#d4)** (`updateStock` never awaited) — in the happy path
-  the floating promise usually resolves before the response is built, so stock looks
-  correct. Its damage is visible through D3: the un-awaited write is what leaves stock
-  consumed after a 400.
+The trick is the number of line items. With two, the two un-awaited `updateStock`
+calls usually serialise and stock lands on the correct value. With five, the window
+opens wide enough to land every time — the floating promises race *each other* inside
+a single request.
+
+```bash
+for run in 1 2 3 4 5; do
+  docker exec challenge-db psql -U postgres -d challengedb -q     -c "UPDATE products SET stock=10 WHERE id=1;"
+  curl -s -o /dev/null -X POST localhost:3000/orders -H "Content-Type: application/json"     -d '{"userId":1,"items":[{"productId":1,"quantity":1},{"productId":1,"quantity":1},{"productId":1,"quantity":1},{"productId":1,"quantity":1},{"productId":1,"quantity":1}]}'
+  sleep 0.7
+  echo -n "run $run: 5x1 from stock 10 -> "
+  docker exec challenge-db psql -U postgres -d challengedb -tAc "SELECT stock FROM products WHERE id=1;"
+done
+```
+
+**Expected:** stock `5` every run (10 − 5×1).
+
+**Observed:**
+```
+run 1: 5x1 from stock 10 -> 7      <-- only 3 of 5 decrements applied
+run 2: 5x1 from stock 10 -> 7
+run 3: 5x1 from stock 10 -> 7
+run 4: 5x1 from stock 10 -> 8      <-- only 2 of 5 applied
+run 5: 5x1 from stock 10 -> 7
+```
+
+**5 of 5 runs lost updates.** `create()` fires `updateStock` without `await`, so every
+call reads stock before any of them writes. This is the same lost-update mechanism as
+[D8](01-defect-analysis.md#d8), but self-inflicted within one request — which is why
+it lands every time where D8 needs a lucky interleaving.
+
+Note this repro depends on duplicate `productId` entries being accepted, which
+[Q7](03-open-questions.md#q7) settles by leaving the request's line items exactly as
+sent — neither merged nor rejected. If that had been decided the other way, this
+construction would start returning 400 and silently stop testing anything.
+
+---
+
+### D9 — not independently observed
+
 - **[D9](01-defect-analysis.md#d9)** (`cancel()` non-atomic) — same class of race as
-  D8, guarded by a check-then-act on `status`. Requires concurrent cancels to observe.
+  D8, guarded by a check-then-act on `status`. Requires concurrent cancels to observe,
+  and given D8 landed only 1 run in 3 with ten parallel requests, chasing it the same
+  way was not judged worth the time for a mechanism already demonstrated.
 
-Both are confirmed by reading the code, not by a reproduction. Treat them as
-structural rather than demonstrated.
+Confirmed by reading the code, not by a reproduction. Treat it as structural rather
+than demonstrated.
 
 ---
 
@@ -328,11 +368,11 @@ docker exec challenge-db psql -U postgres -d challengedb -tAc \
 
 **Observed:**
 ```
-search before create: [ 'Mouse', 'Mousepad' ]
+search before create: [ 'Mouse' ]
 created:              Mouse Mat XL
-search after create:  [ 'Mouse', 'Mousepad' ]     <-- stale
+search after create:  [ 'Mouse' ]                 <-- stale
 
-DB truth:  Mouse / Mousepad / Mouse Mat XL
+DB truth:  Mouse / Mouse Mat XL
 ```
 
 No product write path evicts the cache.
@@ -458,13 +498,24 @@ one request hang. Revert afterwards.
 | [D20](01-defect-analysis.md#d20) NaN userId | ✅ Reproduced |
 | [D21](01-defect-analysis.md#d21) Duplicate email | ✅ Reproduced |
 | [D22](01-defect-analysis.md#d22) Dangling FK | ✅ Reproduced |
+| [D4](01-defect-analysis.md#d4) Floating stock promise | ✅ Reproduced — 5 of 5 runs |
 | [D8](01-defect-analysis.md#d8) Concurrent oversell | ⚠️ Intermittent — 1 of 3 runs |
 | [D11](01-defect-analysis.md#d11) Unbounded retry | ⚠️ Retry observed; exhaustion needs a forced-failure mock |
-| [D4](01-defect-analysis.md#d4) Floating stock promise | 🔍 By inspection — damage visible via D3 |
 | [D9](01-defect-analysis.md#d9) Non-atomic cancel | 🔍 By inspection — same race class as D8 |
 | [D18](01-defect-analysis.md#d18) `db: 0` over `REDIS_DB` | 🔍 By inspection — inert until D1 is fixed |
+| [D12](01-defect-analysis.md#d12) Search scans the whole table | ⚪ Out of scope — measured at 6–20ms either way on this dataset |
 
-**14 of 19 reproduced directly, 2 partially, 3 by code inspection.**
+**15 of 20 reproduced directly, 2 partially, 2 by code inspection, 1 out of scope.**
+
+D4 moved from "by inspection" to reproduced after the five-line-item construction
+above was found. The two remaining inspection-only defects are D9 (needs concurrent
+cancels; same mechanism as D8, already demonstrated) and D18 (100% masked by D1 —
+nothing reaches Redis, so the `db` index has no effect to observe until C2 lands).
+D12 is a separate case: it was briefly promoted to a tenth commit and then moved
+back out. Measuring settled it — on this dataset the search costs 6–20ms whether
+the predicate runs in SQL or in JavaScript, and the gap that justified the
+promotion only appeared after inserting 50,000 synthetic rows. See
+[04](04-scope.md#decided-search-scan).
 
 This supersedes the earlier caveat in the [README](README.md#limits-of-this-method)
 that only 2 of 27 defects had been executed.

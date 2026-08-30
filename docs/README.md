@@ -14,11 +14,11 @@ fixes, so that every code change lands with a stated cause and a way to verify i
 | **[04 — Scope](04-scope.md)** | **Start here.** What we're fixing, what we're deliberately not, and the test used to decide |
 | [01 — Defect Analysis](01-defect-analysis.md) | All 27 confirmed defects: root cause, failure scenario, evidence, proposed fix |
 | [02 — Remediation Plan](02-remediation-plan.md) | The order to fix them in, and why that order is forced |
-| [03 — Open Questions](03-open-questions.md) | Decisions needed from a product/infra owner before some fixes can land |
+| [03 — Open Questions](03-open-questions.md) | The seven decisions that gated the fix plan, each now taken with its reasoning, plus four resolved/non-blocking notes |
 | **[05 — Reproduction Runbook](05-reproduction.md)** | Copy-paste commands to watch each defect fail, with real captured output |
 
 > **The analysis found more than the assignment asks for.** 27 defects are real; 19
-> of them cause a reported symptom, and land as 6 commits. [04 — Scope](04-scope.md) draws that line and
+> of them cause a reported symptom, and land as 9 commits. [04 — Scope](04-scope.md) draws that line and
 > justifies both sides of it. Read it before reading the defect list, or the list
 > reads as a code review rather than an answer to `INSTRUCTIONS.md`.
 
@@ -26,10 +26,10 @@ fixes, so that every code change lands with a stated cause and a way to verify i
 
 | Severity | Count |
 |---|---|
-| 🔴 Critical | 7 |
+| 🔴 Critical | 5 |
 | 🟠 High | 8 |
-| 🟡 Medium | 10 |
-| ⚪ Low | 2 |
+| 🟡 Medium | 6 |
+| ⚪ Low | 8 |
 | **Total** | **27** |
 
 Grouped into 6 themes:
@@ -37,8 +37,8 @@ Grouped into 6 themes:
 - **Cache correctness & wiring** (4) — The Redis cache is never actually connected — @nestjs/cache-manager 3.x reads `options.stores` (plural) and app.module.ts:33 passes `store` (singular), so cache-manager 7 falls back to a per-process in-memory Keyv while an orphaned ioredis socket stays open. On top of that broken foundation sit a constant cache key that collides across all search terms, zero invalidation on any product write, and a hardcoded `db: 0` that ignores REDIS_DB=1. This theme is the origin of the 'cache behavior does not match expectations' symptom and is the ordering constraint for the whole fix plan.
 - **Transactional integrity & concurrency** (5) — Every multi-write flow in the orders module runs as a sequence of independently auto-committed statements with no transaction, no row lock and no conditional UPDATE. Order creation writes the parent row before validating any line item; the stock decrement is a floating promise that writes an absolute value derived from a stale read; cancel() and processPayment both check state and then act on it across an unprotected window. Together these produce orphaned orders, oversold inventory, phantom stock and double charges — the whole 'data is sometimes inconsistent or missing' symptom.
 - **Input validation & mass assignment** (7) — The global ValidationPipe is constructed with `transform: true` but neither `whitelist` nor `forbidNonWhitelisted`, so class-transformer copies every body property onto the DTO and TypeORM's `repository.create()` maps any of them that happen to be columns — including the primary key, which turns POST into a silent UPDATE. Around that hole sit endpoints that bypass validation entirely (an inline structural body type, a bare `@Body('status')`) and DTOs too loose for their columns (empty items arrays, fractional integers, unchecked foreign keys).
-- **Error handling & diagnosability** (6) — Non-HttpException failures are allowed to escape to Nest's default filter as bare 500s (circular JSON, TypeError on an unloaded relation, FK violations, unique-constraint violations, driver type errors), while the two places that DO catch errors destroy them: the batch loop logs a constant id-less string and still returns `success: true`, and the outer catch rewrites any cause into `BadRequestException('Batch processing failed')`. Both halves produce the 'vague or misleading error messages' symptom from opposite directions.
-- **Unbounded & wasted work** (6) — Several endpoints do work proportional to the whole table or to an arbitrary retry budget rather than to the request: a 1000-iteration payment retry loop with a flat 100ms sleep, a search that SELECTs every product and filters in JavaScript, collection endpoints with no pagination hydrating a five-table eager graph, an uncapped batch of serial round-trips, and a category-tree path that joins in every product only to discard them. This is the entire 'extremely slow or never complete' symptom.
+- **Error handling & diagnosability** (5) — Non-HttpException failures are allowed to escape to Nest's default filter as bare 500s (circular JSON, TypeError on an unloaded relation, FK violations, unique-constraint violations, driver type errors), while the two places that DO catch errors destroy them: the batch loop logs a constant id-less string and still returns `success: true`, and the outer catch rewrites any cause into `BadRequestException('Batch processing failed')`. Both halves produce the 'vague or misleading error messages' symptom from opposite directions.
+- **Unbounded & wasted work** (5) — Several endpoints do work proportional to the whole table or to an arbitrary retry budget rather than to the request: a 1000-iteration payment retry loop with a flat 100ms sleep, a search that SELECTs every product and filters in JavaScript, collection endpoints with no pagination hydrating a five-table eager graph, an uncapped batch of serial round-trips, and a category-tree path that joins in every product only to discard them. This is the entire 'extremely slow or never complete' symptom.
 - **Schema & type fidelity** (1) — The entity declarations do not match what the driver actually returns or accepts. All three money columns are `decimal` typed as `number` with no transformer, so pg hands back strings and the same field has one JSON type on create (in-memory entity) and another on read (from DB) — the `Number(order.total)` cast at orders.service.ts:110 is the codebase's own admission of the mismatch.
 
 ## Symptom → cause map
@@ -49,7 +49,6 @@ confirmed defect:
 ### "Some requests are extremely slow or never complete"
 
 - [D11](01-defect-analysis.md#d11) Payment retry loop: maxRetries = 1000 with flat delay and a non-HttpException rethrow
-- [D12](01-defect-analysis.md#d12) searchProducts loads the whole products table and filters in Node
 - [D16](01-defect-analysis.md#d16) Collection endpoints have no pagination and pull the full eager graph
 - [D19](01-defect-analysis.md#d19) POST /products/batch binds an inline structural type, so validation is skipped and the real error is masked
 - [D27](01-defect-analysis.md#d27) getCategoryTree loads every product of the category and never uses them
@@ -128,9 +127,9 @@ Stated plainly, because they change how much each finding should be trusted:
 - ~~**2 of 27 were actually executed.**~~ **Superseded.** Every in-scope defect has
   since been run against the live stack — see
   [05 — Reproduction Runbook](05-reproduction.md), which records real captured output.
-  Of the 19 in-scope defects: **14 reproduced directly, 2 partially (D8 is an
-  intermittent race, D11 needs a forced-failure mock), and 3 stand on code inspection
-  alone (D4, D9, D18)**. The 8 out-of-scope defects were not re-tested. The
+  Of the 19 in-scope defects: **15 reproduced directly, 2 partially (D8 is an
+  intermittent race, D11 needs a forced-failure mock), and 2 stand on code inspection
+  alone (D9, D18)**. The 8 out-of-scope defects were not re-tested. The
   `confidence` field on each defect still means "the mechanism was traced end to end
   in the source," not "we ran it" — the runbook is the authority on what was observed.
 - **Severity was originally ungraded.** The first pass asked for
@@ -155,12 +154,12 @@ the source, because they are the ones the rest of the plan hinges on.
 
 **The Redis store is never wired ([D1](01-defect-analysis.md#d1)).** The installed
 `@nestjs/cache-manager` is 3.1.3, whose `dist/cache.providers.js` references
-`options.stores` three times and `options.store` zero times — while
+`options.stores` four times and `options.store` (singular) never — while
 `app.module.ts:33` passes the singular `store`:
 
 ```
-$ grep -c "options.stores" node_modules/@nestjs/cache-manager/dist/cache.providers.js   # 3
-$ grep -c "options.store" node_modules/@nestjs/cache-manager/dist/cache.providers.js  # 0
+$ grep -c "options.stores"  node_modules/@nestjs/cache-manager/dist/cache.providers.js  # 4
+$ grep -c 'options\.store\b' node_modules/@nestjs/cache-manager/dist/cache.providers.js  # 0
 ```
 
 After exercising every cached endpoint, Redis held **zero keys in every database**,
