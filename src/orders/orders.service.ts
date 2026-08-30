@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   BadRequestException,
   ServiceUnavailableException,
@@ -30,6 +31,8 @@ const paymentService = {
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   // Three attempts with exponential backoff: ~600ms worst case, against the
   // ~200s that 1000 flat 100ms retries could spend holding a request open. A
   // provider that has failed three times running is down, not busy, and the
@@ -228,10 +231,22 @@ export class OrdersService {
     }
 
     // The provider's own Error is not an HttpException, so rethrowing it gave a
-    // bare 500 with no indication the fault was upstream. Carried as `cause` so
-    // the detail stays in the logs without reaching the client.
+    // bare 500 with no indication the fault was upstream. It has to be logged
+    // explicitly: Nest's default filter returns before logging for anything that
+    // IS an HttpException, so a 503 would otherwise leave no trace of why the
+    // provider failed — losing the operator's only record while improving the
+    // client's response. `cause` is kept, but it is not what does the logging.
+    this.logger.error(
+      `Payment provider failed ${this.maxRetries}x for order #${orderId}`,
+      lastError?.stack,
+    );
+
+    // `description` is passed alongside `cause` because supplying an options
+    // object otherwise displaces the positional default, and the body loses its
+    // `error` field — the only response in the API that would be missing one.
     throw new ServiceUnavailableException('Payment service unavailable', {
       cause: lastError,
+      description: 'Service Unavailable',
     });
   }
 
