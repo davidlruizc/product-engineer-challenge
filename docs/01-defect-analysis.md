@@ -367,9 +367,11 @@ src/orders/orders.service.ts:127-139 verbatim:
 127  const order = await this.findOne(id);
 129  if (order.status !== OrderStatus.PENDING) {
 130    throw new BadRequestException('Only pending orders can be cancelled');
+131  }
 133  for (const item of order.items) {
 134    const product = await this.productsService.findOne(item.productId);
 135    await this.productsService.updateStock(product.id, product.stock + item.quantity);
+136  }
 138  order.status = OrderStatus.CANCELLED;
 139  return this.ordersRepository.save(order);
 
